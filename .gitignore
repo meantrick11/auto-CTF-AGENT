@@ -1,0 +1,28 @@
+# API keys — NEVER commit
+.env
+
+# Blackboard persistence — local session data
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Output reports
+*.json
+!package.json
