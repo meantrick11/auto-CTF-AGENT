@@ -2,44 +2,53 @@
 
 ## Role
 
-The tactical brain. Commander reads the blackboard snapshot, reasons about the current situation, and generates the next set of subtasks. **It does not execute any security tools.** It only reads state and publishes tasks.
+The tactical brain. **Does one thing: reads state and decides next actions.** Commander reads a compressed blackboard view, reasons about the situation, and generates subtasks. It does NOT execute any security tools.
 
 ## Files
 
-| File | Role | Input | Output |
-|---|---|---|---|
-| `agent.py` | Commander core: takes blackboard snapshot, returns plan decision | `dict` (blackboard snapshot) | `dict` (decision + new_tasks) |
-| `prompts/system_prompt.txt` | System prompt defining Commander's persona and constraints | — | — |
+| File | Role |
+|---|---|
+| `agent.py` | Commander: takes commander_view, returns plan decision |
+| `prompts/system_prompt.txt` | System prompt defining persona and constraints |
 
 ## Input Protocol
 
+Commander receives `get_commander_view()` from the blackboard — a compressed view designed to fit in context:
+
 ```python
-# Commander.plan(snapshot) receives:
 {
-    "goal": {"id": "...", "description": "攻破...", "status": "running"},
-    "tasks": [
-        {"id": "...", "type": "web_recon", "status": "completed",
-         "instruction": "...", "output_data": {...}}
-    ],
-    "findings": [
-        {"id": "...", "type": "asset", "title": "/admin 后台", "data": {...}}
-    ],
-    "recent_events": [...]
+    "goal": {"id": "...", "description": "...", "status": "running"},
+    "situation_summary": {              # LLM-compacted (may be None before first compaction)
+        "summary": "one paragraph overview",
+        "flags": [...],
+        "vulnerabilities": [...],
+        "assets": [...],
+        "credentials": [...],
+        "key_observations": [...],
+        "recommended_steps": [...]
+    },
+    "pending_tasks": [...],             # only pending tasks
+    "recent_findings": [...],           # last 5, data truncated to 300 chars
+    "stats": {                          # summary counts
+        "total_findings": N,
+        "flags": N, "vulnerabilities": N,
+        "assets": N, "credentials": N
+    },
+    "recent_events": [...]              # last 10
 }
 ```
 
 ## Output Protocol
 
 ```python
-# Commander.plan() returns:
 {
     "decision": "continue",       # continue | completed | failed
-    "reasoning": "发现新资产 /admin，需要进一步探测",
+    "reasoning": "...",
     "new_tasks": [
         {
             "type": "web_exploit",
-            "instruction": "对 /admin 登录口尝试SQL注入",
-            "input_data": {"url": "http://target.com/admin", "method": "POST"}
+            "instruction": "Clear natural language instruction",
+            "input_data": {"url": "..."}
         }
     ],
     "final_summary": ""           # filled when decision is completed/failed
@@ -48,13 +57,6 @@ The tactical brain. Commander reads the blackboard snapshot, reasons about the c
 
 ## Commander's Authority
 
-- **CAN**: Read blackboard, create tasks, update goal status, add events
+- **CAN**: Read blackboard (compressed view), create tasks, update goal status
 - **CANNOT**: Call security tools, execute commands, talk to workers directly
-
-## System Prompt Principles
-
-1. You are a CTF tactical commander — plan, don't execute
-2. Analyze current findings before deciding next steps
-3. Generate 1-3 focused subtasks per round, no more
-4. When a flag is found or all attack surfaces are exhausted, declare completion
-5. Write tasks with clear, actionable natural language instructions for workers
+- **MUST delegate**: Even trivial operations must be tasks for workers

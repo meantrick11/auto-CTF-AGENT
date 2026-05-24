@@ -4,7 +4,7 @@ import json
 import os
 
 from config import DEEPSEEK_MODEL, create_client
-from utils import extract_json
+from utils import extract_json, retry_llm_call
 
 
 class Commander:
@@ -48,18 +48,61 @@ class Commander:
 
     def _build_snapshot_message(self, snapshot: dict) -> str:
         goal = snapshot.get("goal", {})
-        tasks = snapshot.get("tasks", [])
-        findings = snapshot.get("findings", [])
+        tasks = snapshot.get("pending_tasks", snapshot.get("tasks", []))
+        findings = snapshot.get("recent_findings", snapshot.get("findings", []))
+        summary = snapshot.get("situation_summary")
+        stats = snapshot.get("stats", {})
         events = snapshot.get("recent_events", [])
+        recent_tasks = snapshot.get("recent_tasks", [])
 
         parts = [
             "## Current Goal",
             f"Description: {goal.get('description', 'N/A')}",
             f"Status: {goal.get('status', 'N/A')}",
             "",
-            "## Task Status",
         ]
 
+        # ── Situation summary (compacted intelligence) ──
+        if summary:
+            parts.append("## Situation Summary (compacted)")
+            parts.append(json.dumps(summary, ensure_ascii=False, indent=2))
+            parts.append("")
+
+        # ── Stats ──
+        if stats:
+            parts.append("## Stats")
+            parts.append(
+                f"Total findings: {stats.get('total_findings', 0)} | "
+                f"Flags: {stats.get('flags', 0)} | "
+                f"Vulns: {stats.get('vulnerabilities', 0)} | "
+                f"Assets: {stats.get('assets', 0)} | "
+                f"Credentials: {stats.get('credentials', 0)}"
+            )
+            parts.append("")
+
+        # ── Task history (especially failures — avoid repeating) ──
+        if recent_tasks:
+            failed = [t for t in recent_tasks if t.get("status") == "failed"]
+            completed = [t for t in recent_tasks if t.get("status") == "completed"]
+            if failed:
+                parts.append("## Failed Tasks (do NOT repeat these)")
+                for t in failed[-5:]:
+                    err = t.get("error", "")
+                    parts.append(
+                        f"- [{t.get('type')}] {t.get('instruction', '')[:100]}\n"
+                        f"  Error: {err[:120]}"
+                    )
+                parts.append("")
+            if completed:
+                parts.append("## Completed Tasks")
+                for t in completed[-5:]:
+                    parts.append(
+                        f"- [{t.get('type')}] {t.get('instruction', '')[:100]}"
+                    )
+                parts.append("")
+
+        # ── Pending tasks ──
+        parts.append("## Pending Tasks")
         if tasks:
             for t in tasks:
                 parts.append(
@@ -71,10 +114,11 @@ class Commander:
                         f"  Output: {json.dumps(t['output_data'], ensure_ascii=False)[:200]}"
                     )
         else:
-            parts.append("(no tasks yet)")
+            parts.append("(no pending tasks)")
 
+        # ── Recent findings ──
         parts.append("")
-        parts.append("## Findings")
+        parts.append("## Recent Findings")
         if findings:
             for f in findings:
                 parts.append(
@@ -83,7 +127,7 @@ class Commander:
                 )
                 if f.get("data"):
                     parts.append(
-                        f"  Data: {json.dumps(f['data'], ensure_ascii=False)[:150]}"
+                        f"  Data: {json.dumps(f['data'], ensure_ascii=False)[:200]}"
                     )
         else:
             parts.append("(no findings yet)")
@@ -109,14 +153,16 @@ class Commander:
         return "\n".join(parts)
 
     def _call_llm(self, user_message: str) -> dict:
-        response = self._client.chat.completions.create(
-            model=self.model,
-            max_tokens=2048,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+        response = retry_llm_call(
+            lambda: self._client.chat.completions.create(
+                model=self.model,
+                max_tokens=2048,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": self._system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+            )
         )
 
         text = response.choices[0].message.content or ""

@@ -21,7 +21,7 @@ class WorkerFinding:
 class TaskResult:
     """Standard return type for ALL Worker.execute() calls.
 
-    Every Worker MUST return a TaskResult (or a plain dict — see note below).
+    Every Worker MUST return a TaskResult.
     This is the contract between Action Plane and the rest of the system.
     Filter, Blackboard, and Engine all depend on this shape.
     """
@@ -30,6 +30,12 @@ class TaskResult:
     summary: str = ""
     output_data: dict = field(default_factory=dict)
     findings: list[WorkerFinding] = field(default_factory=list)
+    error_detail: dict | None = None
+    # error_detail shape (on failure):
+    #   {"error_type": "network_error|auth_failed|tool_error|max_iterations|...",
+    #    "status_code": 403,
+    #    "detail": "human-readable description",
+    #    "last_action": "what was being attempted"}
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +52,7 @@ class TaskResult:
                 }
                 for f in self.findings
             ],
+            "error_detail": self.error_detail,
         }
 
     @staticmethod
@@ -65,6 +72,7 @@ class TaskResult:
             summary=d.get("summary", ""),
             output_data=d.get("output_data", {}),
             findings=findings,
+            error_detail=d.get("error_detail"),
         )
 
 

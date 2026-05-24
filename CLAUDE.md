@@ -1,21 +1,26 @@
 # CTFAgent — LLM-Driven Multi-Agent Penetration Testing System
 
-## Project State (2026-05-23)
+## Project State (2026-05-24)
 
-**MVP phase complete.** Core loop works: Commander → Blackboard → Worker → Findings → loop.
+**MVP phase complete. Context compression implemented.**
 
 ### What Works (end-to-end verified)
 - Base64 decode → flag extraction (2 rounds, 1 finding, flag captured)
 - HTTP target attack → recon + exploit → flag (2 rounds, 10 findings, flag captured)
+- **LLM retry** — exponential backoff (1s/2s/4s) on transient API errors (429, 5xx, connection)
+- **Config validation** — fail-fast at startup if API key missing or base_url misconfigured
+- **Filter** — rule-based data washer: dedup by (type,title), normalize, mark large data
+- **Compaction** — LLM summarization of findings when data exceeds 3000-char threshold
+- **Commander compressed view** — gets summary + recent 5 findings + stats, not full dump
 
 ### Current Capabilities
 - Web reconnaissance: directory scan, form extraction, header analysis
 - Web exploitation: SQLi, XSS, command injection probing
 - Encoding tools: base64, hex, URL encode/decode, ROT13
 - HTTP GET/POST with SSL verification disabled (Windows compat)
+- Context compression: two-tier (Filter rules → Compactor LLM) to keep Commander context small
 
 ### Deferred (explicitly excluded from MVP)
-- Filter (Data Washer agent) — Worker output goes directly to Commander
 - Guardrail (Safety sentinel) — no dangerous ops in local testing
 - Multi-domain workers (Crypto, RE, PWN, Forensics) — only Web
 - DB persistence — JSON file only
@@ -33,7 +38,7 @@ before_plan        → Guardrail: check goal safety
 after_plan         → Logging: record Commander decisions
 before_task_create → Guardrail: check task safety
 before_execute     → Guardrail: last safety gate
-after_execute      → Filter: clean/deduplicate Worker output
+after_execute      → Filter: dedup/normalize/mark (implemented)
 on_finding         → Notify: flag found → alert
 on_complete        → Cleanup: save report, notify
 ```
@@ -43,20 +48,36 @@ Call `event.block("reason")` to stop execution. Modify `event.data` to mutate pa
 
 Key files: `hooks.py` (HookEvent + HookRegistry), `orchestrator/engine.py` (7 fire points).
 
-## Architecture (8 modules)
+## Architecture (9 modules)
 
 ```
 main.py → orchestrator/engine.py  ←── the ONLY coupling point
               ├── commander/agent.py           (depends: config, utils)
               ├── workers/registry.py          (depends: workers/base_worker.py)
               ├── workers/web/agent.py         (depends: config, utils, tools, base_worker)
-              ├── filter/                      (hook: after_execute)
+              ├── filter/cleaner.py            (hook: after_execute — rule-based)
               ├── guardrail/                   (hooks: before_plan, before_task_create, before_execute)
-              └── blackboard/                  (depends: NOTHING)
+              └── blackboard/                  (depends: NOTHING — includes compaction)
 ```
 
 **Key rule:** Commander and Worker are 100% independent. No direct import or communication.
 All coordination through Blackboard: Commander writes Tasks → Worker writes Findings.
+
+### Module Responsibility Principle
+
+**Each module does ONE thing well:**
+
+| Module | One Thing |
+|---|---|
+| Commander | Read state → decide next actions |
+| Worker | Execute one task → return findings |
+| Blackboard | Store and serve state (append-only) |
+| Filter | Clean findings without dropping data (rules, no LLM) |
+| Compactor | Summarize accumulated findings (LLM, threshold-triggered) |
+| Engine | Drive the loop (sole coupling point) |
+| ToolRegistry | Register and dispatch tools |
+| WorkerRegistry | Register and route workers |
+| Hooks | Fire events, let plugins intercept |
 
 ## File Index
 
@@ -64,7 +85,7 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 | File | Role |
 |---|---|
 | `main.py` | CLI entry: argparse → Engine.run() |
-| `config.py` | Loads .env, creates OpenAI client (DeepSeek), SSL config |
+| `config.py` | Loads .env, creates OpenAI client (DeepSeek), SSL config, validate_config() |
 | `requirements.txt` | openai>=1.0.0, python-dotenv>=1.0.0 |
 | `.env.example` | API key template |
 | `.env` | Actual keys (git-ignored) |
@@ -73,17 +94,17 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 | File | Role |
 |---|---|
 | `blackboard/schema.py` | Data models: Goal, Task, Finding, EventLog + enums |
-| `blackboard/blackboard.py` | CRUD + JSON atomic write. Auto-clears between runs. |
+| `blackboard/blackboard.py` | CRUD + JSON atomic write + compaction + commander_view. Auto-clears between runs. |
 
 ### Orchestrator
 | File | Role |
 |---|---|
-| `orchestrator/engine.py` | Main loop: Commander.plan → Worker.execute → converge. Clears old blackboard on start. |
+| `orchestrator/engine.py` | Main loop: Commander.plan → Worker.execute → compact → converge. Clears old blackboard on start. |
 
 ### Commander (Orchestration Plane)
 | File | Role |
 |---|---|
-| `commander/agent.py` | Reads snapshot dict → LLM → returns decision JSON. NO tools. |
+| `commander/agent.py` | Reads compressed commander_view → LLM → returns decision JSON. NO tools. |
 | `commander/prompts/system_prompt.txt` | Forbids self-solving, requires delegation to workers. |
 
 ### Workers (Action Plane)
@@ -103,11 +124,12 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 | `tools/web/recon.py` | web_directory_scan, web_extract_forms, web_analyze_headers |
 | `tools/web/exploit.py` | web_sqli_test, web_xss_test, web_command_injection_test |
 
-### Filter (Data Washer — placeholder)
+### Filter (Data Washer — implemented)
 | File | Role |
 |---|---|
-| `filter/README.md` | Full spec: hook point, I/O protocol, dedup/confidence/truncate operations, test pattern |
-| `filter/__init__.py` | Placeholder — import skeleton when implementation starts |
+| `filter/cleaner.py` | Rule-based: dedup by (type,title), normalize fields, mark large data. Hooks into after_execute. |
+| `filter/__init__.py` | Imports cleaner to register hook. |
+| `filter/README.md` | Full spec: hook point, operations, what Filter does NOT do. |
 
 ### Guardrail (Safety Shield — placeholder)
 | File | Role |
@@ -118,6 +140,8 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 ### Docs
 | File | Role |
 |---|---|
+| `PROGRESS.md` | Daily progress log — what was done each day, brief |
+| `docs/SPEC.md` | **Architecture spec + Worker paradigm** — component contracts, info flow, template for new workers, architecture rules |
 | `docs/architecture.md` | Architecture overview (simplified) |
 | `ArchitectureBookEN.md` | Full architecture design document (the blueprint) |
 | `ArchitectureBookCN.md` | Chinese version |
@@ -135,7 +159,7 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 ### Utilities
 | File | Role |
 |---|---|
-| `utils.py` | `extract_json()` — bracket-counting JSON extractor from LLM text output |
+| `utils.py` | `extract_json()` bracket-counting JSON extractor + `retry_llm_call()` exponential backoff retry |
 
 ## How to Run
 
@@ -155,11 +179,16 @@ python main.py -g "Decode this base64: ZmxhZ3tmYWpka2xmamFvZmpxZWlmXzEzMjE0YWZsZ
 
 ## Key Design Decisions
 
-1. **SSL verify disabled** (CTFAGENT_SSL_VERIFY=false in .env) — Windows certificate chain issue
-2. **Blackboard auto-clears** each run — `engine.py` line 36-37 deletes old JSON before creating new Blackboard
-3. **Tool registration** happens on import — `tools/__init__.py` imports all tool modules so @register_tool decorators fire
-4. **DeepSeek API** via OpenAI SDK — base_url must include `/v1`
-5. **extract_json()** uses bracket counting, not regex — handles nested arrays/objects correctly
+1. **Each module does ONE thing well** — Commander decides, Worker executes, Blackboard stores, Filter cleans, Compactor summarizes, Engine wires. No module does two jobs.
+2. **SSL verify disabled** (CTFAGENT_SSL_VERIFY=false in .env) — Windows certificate chain issue
+3. **Blackboard auto-clears** each run — `engine.py` deletes old JSON before creating new Blackboard
+4. **Findings are append-only** — never modified after write. Compaction writes to a separate `situation_summary` field, leaving original findings intact.
+5. **Two views from Blackboard**: `snapshot()` (full, for Workers who need detail) and `get_commander_view()` (compressed, for Commander who needs overview)
+6. **Context compression is two-tier**: Filter (rules, per-task, free) → Compactor (LLM, cross-round, threshold-triggered)
+7. **Tool registration** happens on import — `tools/__init__.py` imports all tool modules so @register_tool decorators fire
+8. **DeepSeek API** via OpenAI SDK — base_url is `https://api.deepseek.com` (no /v1 needed)
+9. **extract_json()** uses bracket counting, not regex — handles nested arrays/objects correctly
+10. **LLM retry** on transient failures — 3 attempts with exponential backoff, does not retry on auth errors
 
 ## Coding Conventions & Hard-Won Rules
 
@@ -187,7 +216,7 @@ These were discovered through debugging. Violating any of them breaks the system
 - Domain tools MAY import shared tools (e.g., `tools/web/recon.py` imports `http_get` from shared network).
 
 ### API / LLM
-- **DeepSeek base URL MUST include `/v1`.** `https://api.deepseek.com/v1` — the OpenAI SDK appends `/chat/completions` to base_url.
+- **DeepSeek base URL is `https://api.deepseek.com`** (no `/v1` suffix). The OpenAI SDK appends `/chat/completions` automatically.
 - **SSL verify is OFF** (`CTFAGENT_SSL_VERIFY=false`). Windows cert chain issues. Config creates `httpx.Client(verify=False)`.
 - **`config.create_client()`** is the single factory for OpenAI clients. Both Commander and Worker use it.
 - Worker tool calling uses **OpenAI format**: `tool_calls` in assistant messages, `role: "tool"` for results.
@@ -203,6 +232,15 @@ These were discovered through debugging. Violating any of them breaks the system
 ### Error Handling
 - Both `Commander.plan()` and `Worker.execute()` have try/except that return structured results (never raise).
 - Worker returns `TaskResult(status="failed", summary="...", findings=[])` on error so the loop continues.
+- `retry_llm_call()` in `utils.py` wraps all LLM API calls. Retries on 429/5xx/connection/timeout. Does NOT retry on 401/400.
+
+### Context Compression
+- **Filter is rule-based, never drops data.** Dedup merges (type,title), normalize fills missing fields, truncate only marks (`_truncated=True`). No confidence-based deletion.
+- **Compactor is LLM-based, threshold-triggered.** Only runs when findings data exceeds 3000 chars. Generates `situation_summary` dict stored separately from original findings.
+- **Findings are append-only.** Once written to blackboard, findings are never modified. Compaction writes to a separate field.
+- **Commander reads `get_commander_view()`** (summary + recent 5 findings + stats), not raw `snapshot()`.
+- **Worker reads `snapshot()`** (full findings) — Workers need detail to do their job.
+- **Compaction is non-critical.** If it fails, Commander gets a larger view but execution continues.
 
 ### Worker Contract (schema + registration)
 - **ALL `Worker.execute()` methods MUST return `TaskResult`.** This is the Action Plane contract. Filter, Blackboard, and Engine depend on `.status`, `.summary`, `.output_data`, `.findings` being present.
@@ -235,7 +273,7 @@ These were discovered through debugging. Violating any of them breaks the system
 - Add persistent memory / RAG knowledge base
 - MCP tool integration
 - Additional domain workers (Crypto, RE)
-- Filter agent for data cleaning
 - Guardrail agent for safety
 - SQLite persistence
 - Multi-task session support
+- Worker context compression (Worker currently gets full snapshot — same approach as Commander)

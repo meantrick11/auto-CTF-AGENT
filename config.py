@@ -9,7 +9,7 @@ load_dotenv()
 
 # DeepSeek API
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 # SSL — set CTFAGENT_SSL_VERIFY=false in .env to disable (Windows proxy/AV workaround)
@@ -20,6 +20,20 @@ DATA_DIR = os.getenv("CTFAGENT_DATA_DIR", "data")
 
 # Limits
 MAX_ROUNDS_DEFAULT = int(os.getenv("CTFAGENT_MAX_ROUNDS", "10"))
+
+
+def validate_config():
+    """Validate required configuration. Raises ValueError on misconfiguration."""
+    if not DEEPSEEK_API_KEY:
+        raise ValueError(
+            "DEEPSEEK_API_KEY is not set. "
+            "Add it to your .env file: DEEPSEEK_API_KEY=sk-..."
+        )
+    if not DEEPSEEK_BASE_URL:
+        raise ValueError(
+            "DEEPSEEK_BASE_URL is not set. "
+            "Set it to https://api.deepseek.com"
+        )
 
 
 def create_client(model: str | None = None) -> OpenAI:

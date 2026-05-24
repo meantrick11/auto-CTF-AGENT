@@ -2,116 +2,50 @@
 
 ## Role
 
-Middleware between Worker output and Blackboard. Receives raw Worker execution results, cleans and normalizes them, then passes structured intelligence to the blackboard. Prevents context overload for the Commander.
+Rule-based data cleaner between Worker output and Blackboard. Hooks into `after_execute`. **Does one thing: clean findings without dropping data.**
+
+## Status: Implemented (2026-05-24)
 
 ## Hook Point
 
 **`after_execute`** — fires after `Worker.execute()` returns, before findings are written to blackboard.
 
 ```
-Worker.execute() → result dict
+Worker.execute() → TaskResult
                          │
                     ┌────▼────┐
                     │  Filter  │  ← after_execute hook
                     └────┬────┘
                          │
-                    cleaned result
+                    cleaned TaskResult
                          │
                     ┌────▼────┐
                     │ Blackboard.write()
                     └─────────┘
 ```
 
-## Input (event.data)
+## What Filter Does
 
-```python
-{
-    "task": {
-        "id": "task-001",
-        "type": "web_recon",
-        "instruction": "...",
-        "input_data": {...}
-    },
-    "result": {
-        "status": "completed",
-        "summary": "...",
-        "output_data": {...},
-        "findings": [
-            {"type": "asset", "title": "...", "confidence": 1.0, ...},
-            {"type": "asset", "title": "...", "confidence": 0.3, ...},  # duplicate
-        ]
-    }
-}
-```
-
-## Output (modify event.data["result"] in place)
-
-Filter modifies `event.data["result"]` directly. The engine reads it back after the hook:
-
-```python
-# engine.py after firing hook:
-ev = fire("after_execute", task=task, result=result)
-result = ev.data.get("result", result)  # uses modified version
-```
-
-## What Filter Should Do
-
-| Operation | Description | Priority |
+| Operation | How | Safe? |
 |---|---|---|
-| **Deduplicate** | Merge findings with same title + same data (e.g., two workers found the same /admin) | High |
-| **Confidence filter** | Drop findings with confidence < threshold (default 0.5) | High |
-| **Truncate** | Limit verbose output_data to N characters to keep blackboard compact | Medium |
-| **Normalize** | Ensure all findings have required fields (type, title, data, confidence) | Medium |
-| **Merge assets** | If two assets are sub-paths of the same host, group them | Low |
-| **LLM summary** | If output is too verbose, call a small/cheap model to summarize | Low (deferred) |
+| **Dedup** | Same (type, title) → merge, take higher confidence, merge data dicts | Yes — no data lost |
+| **Normalize** | Fill missing `type` → "info", `title` → "untitled" | Yes |
+| **Truncate mark** | data > 500 chars → set `_truncated=True`, `_original_size=N` | Yes — original data intact |
 
-## Implementation Skeleton
+## What Filter Does NOT Do
 
-```python
-# filter/cleaner.py
-from hooks import on
+- **Does NOT drop low-confidence findings** — that's the Compactor's job (LLM judgment)
+- **Does NOT delete data** — only merges and marks
+- **Does NOT call LLM** — pure rules, zero cost
 
-@on("after_execute")
-def filter_worker_output(event):
-    result = event.data["result"]
-    findings = result.get("findings", [])
+## Files
 
-    # 1. Deduplicate by title
-    seen = set()
-    unique = []
-    for f in findings:
-        key = (f["type"], f["title"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(f)
-    dropped = len(findings) - len(unique)
+| File | Role |
+|---|---|
+| `cleaner.py` | Filter hook implementation — `@on("after_execute")` |
+| `__init__.py` | Imports cleaner to register hook |
+| `README.md` | This file |
 
-    # 2. Drop low confidence
-    filtered = [f for f in unique if f.get("confidence", 1.0) >= 0.5]
+## Principle
 
-    result["findings"] = filtered
-    if dropped:
-        result.setdefault("_filter_stats", {})["deduplicated"] = dropped
-```
-
-## Testing Filter Independently
-
-Filter is a pure function of `event.data["result"]`. No blackboard, no LLM needed:
-
-```python
-from filter.cleaner import filter_worker_output
-from hooks import HookEvent
-
-ev = HookEvent("after_execute", {
-    "task": {"id": "test"},
-    "result": {
-        "findings": [
-            {"type": "asset", "title": "/admin", "confidence": 1.0},
-            {"type": "asset", "title": "/admin", "confidence": 0.9},  # duplicate
-            {"type": "vulnerability", "title": "XSS?", "confidence": 0.3},  # low conf
-        ]
-    }
-})
-filter_worker_output(ev)
-assert len(ev.data["result"]["findings"]) == 1  # only the first /admin remains
-```
+Filter is a **mechanical worker**, not an intelligence analyst. It does safe, cheap, deterministic operations. Judgment calls (what's important, what's noise) belong to the Compactor, which is LLM-powered and runs separately.

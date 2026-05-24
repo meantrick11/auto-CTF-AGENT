@@ -4,12 +4,14 @@
 
 The single source of truth for the entire system. All agents read from and write to the blackboard. No agent communicates directly with another agent.
 
+**Does one thing: store and serve state. Findings are append-only — never modified after write.**
+
 ## Files
 
-| File | Role | Input | Output |
-|---|---|---|---|
-| `schema.py` | Data model definitions (Goal, Task, Finding, EventLog) | — | Dataclass/typed dict definitions |
-| `blackboard.py` | CRUD operations + JSON file persistence | Method calls from Commander/Worker/Engine | Updated state, persisted to `data/blackboard.json` |
+| File | Role |
+|---|---|
+| `schema.py` | Data model definitions (Goal, Task, Finding, EventLog) |
+| `blackboard.py` | CRUD + JSON persistence + compaction + commander view |
 
 ## Data Models
 
@@ -17,19 +19,25 @@ The single source of truth for the entire system. All agents read from and write
 - `id`, `description`, `status` (pending/running/completed/failed), `created_at`
 
 ### Task
-- `id`, `goal_id`, `type` (web_recon/web_exploit), `status` (pending/assigned/running/completed/failed)
-- `assigned_to`, `instruction` (NL for Worker), `input_data`, `output_data`
+- `id`, `goal_id`, `type`, `status` (pending/assigned/running/completed/failed)
+- `assigned_to`, `instruction`, `input_data`, `output_data`
 - `created_at`, `completed_at`
 
-### Finding
+### Finding (append-only)
 - `id`, `source_task_id`, `type` (vulnerability/credential/flag/asset/info)
 - `title`, `data` (dict), `confidence` (0.0-1.0), `timestamp`
+
+### Situation Summary (compaction output)
+- LLM-generated structured summary stored separately from findings
+- Fields: `summary`, `flags`, `vulnerabilities`, `assets`, `credentials`, `key_observations`, `recommended_steps`
+- Updated by `compact()`, read by Commander via `get_commander_view()`
 
 ### EventLog
 - `timestamp`, `agent_name`, `action`, `detail`
 
 ## API Surface
 
+### Core CRUD
 | Method | Caller | Purpose |
 |---|---|---|
 | `create_goal(description)` | Engine | Initialize mission |
@@ -38,15 +46,21 @@ The single source of truth for the entire system. All agents read from and write
 | `create_task(type, instruction, input_data)` | Commander | Publish new subtask |
 | `get_pending_tasks()` | Engine | Find unassigned tasks |
 | `assign_task(task_id, worker_name)` | Engine | Route task to worker |
-| `get_assigned_task(worker_name)` | Worker | Get my work item |
 | `complete_task(task_id, output_data)` | Worker | Submit results |
-| `add_finding(finding)` | Worker | Record discovery |
-| `get_findings()` | Commander | Read all intelligence |
-| `get_findings_by_type(type)` | Commander | Filter by type |
+| `add_finding(finding)` | Worker | Record discovery (append-only) |
+| `get_findings()` | — | Read all intelligence |
+| `get_findings_by_type(type)` | — | Filter by type |
 | `add_event(agent, action, detail)` | All | Append audit log |
 | `get_recent_events(n)` | Commander | Read recent history |
-| `snapshot()` | All | Full state dump |
+| `snapshot()` | Worker, Hooks | Full state dump (for Workers who need detail) |
+
+### Compaction (added 2026-05-24)
+| Method | Caller | Purpose |
+|---|---|---|
+| `_needs_compact(threshold=3000)` | Engine | Check if findings data exceeds threshold |
+| `compact(client, model)` | Engine | LLM summarization → situation_summary |
+| `get_commander_view()` | Engine→Commander | Compressed view: summary + recent findings + stats |
 
 ## Persistence
 
-MVP uses a single JSON file at `data/blackboard.json`. Every mutation triggers an atomic write (write to temp file → rename).
+MVP uses a single JSON file at `data/blackboard.json`. Every mutation triggers an atomic write (write to temp file → rename). Cleared between runs (new goal = fresh blackboard).

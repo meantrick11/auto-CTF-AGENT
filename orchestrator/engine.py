@@ -5,10 +5,14 @@ import os
 
 from blackboard.blackboard import Blackboard
 from commander.agent import Commander
+from config import create_client
 from workers.base_worker import TaskResult
 from workers.registry import get_worker_registry
 from workers.web.agent import WebWorker
 from hooks import fire
+
+# Register Filter hook (side-effect on import)
+import filter.cleaner  # noqa: F401
 
 
 class Engine:
@@ -58,7 +62,9 @@ class Engine:
                 self._log(f"[BLOCKED] before_plan: {ev.block_reason}")
                 return self._build_report("failed", ev.block_reason)
 
-            decision = self.commander.plan(snapshot)
+            decision = self.commander.plan(
+                self.blackboard.get_commander_view()
+            )
 
             # ── Hook: after_plan ──
             fire("after_plan", snapshot=snapshot, decision=decision, round=self._round)
@@ -98,6 +104,8 @@ class Engine:
 
             for task in pending:
                 self._execute_task(task)
+
+            self._maybe_compact()
 
         # Max rounds reached
         self._log(f"\n=== Max rounds ({self.max_rounds}) reached ===")
@@ -166,19 +174,30 @@ class Engine:
                     "confidence": finding.confidence,
                     "source_task_id": finding.source_task_id,
                 }
-            self.blackboard.add_finding(finding)
-            self._log(f"  Finding: [{finding['type']}] {finding['title']}")
+            added = self.blackboard.add_finding(finding)
+            if added is not None:
+                self._log(f"  Finding: [{finding['type']}] {finding['title']}")
+            else:
+                self._log(f"  (dup) [{finding['type']}] {finding['title']}")
 
-        # Complete task
+        # Complete task — include error_detail for Commander visibility
+        task_output = {
+            "summary": summary,
+            "raw_output": output_data,
+        }
+        if isinstance(result, TaskResult) and result.error_detail:
+            task_output["error_detail"] = result.error_detail
+
         self.blackboard.complete_task(
             task_id,
-            {
-                "summary": summary,
-                "raw_output": output_data,
-            },
+            task_output,
             status,
         )
-        self._log(f"  Task {task_id}: {status}")
+        if status == "failed" and task_output.get("error_detail"):
+            ed = task_output["error_detail"]
+            self._log(f"  Task {task_id}: failed ({ed.get('error_type')}: {ed.get('detail', '')[:80]})")
+        else:
+            self._log(f"  Task {task_id}: {status}")
 
     def _route_task(self, task_type: str):
         reg = get_worker_registry()
@@ -187,6 +206,20 @@ class Engine:
             return worker
         # Fallback: any worker willing to try
         return reg.get("web_worker")
+
+    def _maybe_compact(self):
+        """Trigger LLM compaction when findings accumulate past threshold."""
+        if not self.blackboard._needs_compact():
+            return
+        self._log("[Compact] Findings threshold exceeded, generating summary...")
+        client = create_client(self.model)
+        self.blackboard.compact(client, model=self.model)
+        summary = self.blackboard._situation_summary
+        if summary:
+            self._log(
+                f"[Compact] Summary generated: "
+                f"{summary.get('summary', '')[:100]}"
+            )
 
     def _build_report(self, outcome: str, summary: str) -> dict:
         return {

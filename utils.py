@@ -2,6 +2,15 @@
 
 import json
 import re
+import time
+
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 
 
 def extract_json(text: str) -> dict | None:
@@ -71,3 +80,37 @@ def extract_json(text: str) -> dict | None:
             pass
 
     return None
+
+
+def retry_llm_call(fn, max_retries=3, base_delay=1.0):
+    """Call fn with exponential backoff on transient API errors.
+
+    Retries on: rate limits (429), server errors (5xx),
+    connection errors, and timeouts.
+    Does NOT retry on: auth errors (401), bad requests (400).
+    """
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except (APIConnectionError, APITimeoutError,
+                InternalServerError, RateLimitError) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                delay = base_delay * (2 ** attempt)
+                print(f"[Retry] {type(exc).__name__}, "
+                      f"retrying in {delay:.1f}s "
+                      f"(attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+        except APIStatusError as exc:
+            if exc.status_code >= 500:
+                last_exc = exc
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    print(f"[Retry] HTTP {exc.status_code}, "
+                          f"retrying in {delay:.1f}s "
+                          f"(attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+            else:
+                raise
+    raise last_exc  # type: ignore

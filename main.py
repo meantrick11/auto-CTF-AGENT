@@ -11,6 +11,7 @@ import json
 import sys
 
 from orchestrator.engine import Engine
+from config import validate_config
 
 
 def main():
@@ -39,6 +40,8 @@ def main():
     )
 
     args = parser.parse_args()
+
+    validate_config()
 
     engine = Engine(
         model=args.model,

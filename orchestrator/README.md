@@ -2,55 +2,57 @@
 
 ## Role
 
-The main event loop that wires all components together. It owns the blackboard lifecycle, drives the Commander-Worker loop, and decides when execution terminates.
+The main event loop that wires all components together. **Does one thing: drives the loop.** Owns the blackboard lifecycle, triggers compaction, and decides when execution terminates.
 
 ## Files
 
-| File | Role | Input | Output |
-|---|---|---|---|
-| `engine.py` | Main loop: init → Commander.plan → Worker.execute → converge → repeat | User goal string + config | Final report |
+| File | Role |
+|---|---|
+| `engine.py` | Main loop: init → Commander.plan → Worker.execute → compact → repeat |
 
-## Loop Logic (Pseudocode)
+## Loop Logic
 
 ```
 1. blackboard.create_goal(user_input)
 2. for round in 1..max_rounds:
-   a. snapshot = blackboard.snapshot()
-   b. [hook: before_plan] → guardrail check
-   c. decision = commander.plan(snapshot)
+   a. [hook: before_plan]
+   b. commander_view = blackboard.get_commander_view()   ← compressed view
+   c. decision = commander.plan(commander_view)
    d. [hook: after_plan]
    e. if decision is "completed" or "failed": break
-   f. for each new_task in decision.new_tasks:
-        [hook: before_task_create] → guardrail check
+   f. for each new_task:
+        [hook: before_task_create]
         blackboard.create_task(...)
    g. for each pending task:
         route via WorkerRegistry.route(task_type)
-        [hook: before_execute] → last safety gate
-        worker.execute(task) → TaskResult
-        [hook: after_execute] → Filter cleans/deduplicates
+        [hook: before_execute]
+        worker.execute(task, full_snapshot)   ← Worker gets full snapshot
+        [hook: after_execute] → Filter cleans (dedup, normalize)
         for each finding: [hook: on_finding] → blackboard.add_finding()
         blackboard.complete_task(...)
-3. [hook: on_complete] → print final summary
+   h. _maybe_compact()   ← check threshold, LLM summarize if exceeded
+3. [hook: on_complete]
 ```
 
-## Worker Routing
+## Key Design Points
 
-Uses `WorkerRegistry` (singleton, same pattern as ToolRegistry). Each worker registers with `task_prefixes` (e.g. `["web_"]`). `_route_task()` calls `registry.route(task_type)` with fallback to `web_worker`. No hardcoded if/elif chains — adding a worker is one `reg.register()` call.
+### Two Views
+- **Commander** gets `get_commander_view()` — compressed: situation_summary + recent_findings(5) + stats
+- **Worker** gets `snapshot()` — full: all findings (Worker needs detail to do its job)
 
-## Result Handling
+### Compaction
+- Triggered after all tasks in a round are done, before next Commander.plan()
+- Threshold: findings data total > 3000 chars
+- LLM generates structured summary, stored separately (original findings untouched)
 
-Engine normalizes both `TaskResult` and plain dicts in `_execute_task()`. Worker's `execute()` MUST return `TaskResult`. The Filter hook (`after_execute`) receives the raw object and can modify in place.
-
-## Configuration
-
-- `max_rounds`: int = 10 — safety limit to prevent infinite loops
-- `model`: str = "deepseek-v4-pro" — LLM model for agents
+### Worker Routing
+Uses `WorkerRegistry` (singleton). Each worker registers with `task_prefixes` (e.g. `["web_"]`). `_route_task()` calls `registry.route(task_type)` with fallback to `web_worker`. No hardcoded if/elif chains.
 
 ## Input
 
-- User's natural language goal (e.g., "攻破 http://target.com 获取flag")
+- User's natural language goal (e.g., "Attack http://target.com and capture the flag")
 
 ## Output
 
 - Console log of each round's actions
-- Final report: goal status, all findings, key decisions
+- Final report: outcome, rounds, flag, findings, task history, event log
