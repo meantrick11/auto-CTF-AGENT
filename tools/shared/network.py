@@ -2,6 +2,7 @@
 
 import urllib.request
 import urllib.error
+import socket
 import json
 import ssl
 
@@ -58,9 +59,15 @@ def http_get(url: str, headers: dict | None = None,
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         return _build_response(e, body)
+    except urllib.error.URLError as exc:
+        return {"status_code": 0, "headers": {}, "body": "",
+                "body_length": 0, "error": str(exc), "error_type": "connection_error"}
+    except socket.timeout as exc:
+        return {"status_code": 0, "headers": {}, "body": "",
+                "body_length": 0, "error": str(exc), "error_type": "timeout"}
     except Exception as exc:
         return {"status_code": 0, "headers": {}, "body": "",
-                "body_length": 0, "error": str(exc)}
+                "body_length": 0, "error": str(exc), "error_type": "unknown"}
 
 
 @register_tool(category="shared", description="Send an HTTP POST request. Returns ALL response headers including Set-Cookie (redirects are NOT followed).")
@@ -69,7 +76,12 @@ def http_post(url: str, data: str = "", headers: dict | None = None,
     body_bytes = data.encode("utf-8")
     req = urllib.request.Request(url, data=body_bytes, method="POST")
     req.add_header("User-Agent", "CTFAgent/1.0")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+    has_content_type = headers is not None and any(
+        k.lower() == "content-type" for k in headers
+    )
+    if not has_content_type:
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
     if cookies:
         cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
@@ -86,6 +98,12 @@ def http_post(url: str, data: str = "", headers: dict | None = None,
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         return _build_response(e, body)
+    except urllib.error.URLError as exc:
+        return {"status_code": 0, "headers": {}, "body": "",
+                "body_length": 0, "error": str(exc), "error_type": "connection_error"}
+    except socket.timeout as exc:
+        return {"status_code": 0, "headers": {}, "body": "",
+                "body_length": 0, "error": str(exc), "error_type": "timeout"}
     except Exception as exc:
         return {"status_code": 0, "headers": {}, "body": "",
-                "body_length": 0, "error": str(exc)}
+                "body_length": 0, "error": str(exc), "error_type": "unknown"}

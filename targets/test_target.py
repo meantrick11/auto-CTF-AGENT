@@ -1,7 +1,7 @@
 """Local vulnerable web target for testing CTFAgent workflow.
 
-Usage:
-    .\.venv\Scripts\python.exe test_target.py
+Usage (from project root):
+    .\.venv\Scripts\python.exe targets\test_target.py
     # Then in another terminal:
     .\.venv\Scripts\python.exe main.py -g "Attack http://localhost:8888 and capture the flag" -n 12
 """

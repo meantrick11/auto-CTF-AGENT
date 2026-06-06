@@ -1,291 +1,257 @@
-# CTFAgent — Architecture Spec & Worker Paradigm
+# CTFAgent — Architecture Spec (v2)
 
 ## Component Map
 
 ```
-                    ┌─────────────┐
-                    │   Engine    │  sole coupling point — drives the loop
-                    └──┬───┬───┬──┘
-         ┌─────────────┤   │   ├─────────────┐
-         ▼             ▼   │   ▼             ▼
-    Commander      Worker  │  Filter      Blackboard
-    (decide)       (execute)│ (clean)      (store)
-         │             │   │   │             │
-         └─────┬───────┘   │   └─────┬───────┘
-               │           │         │
-          No direct         │   Compactor
-          import            │   (summarize)
-                            │
-                      Hook System (7 events)
+                          ┌──────────────┐
+                          │   Monitor    │  横切度量（只读不写）
+                          │ tokens/耗时   │  Hook: before_plan, on_complete
+                          └──────────────┘
+
+User Goal
+    │
+    ▼
+┌──────────┐  方向分配     ┌──────────────┐
+│ Commander │────────────→ │    Engine    │  sole coupling point
+│ 读状态    │              │  驱动循环     │
+│ 定方向    │←─────────────│  并行调度     │
+└──────────┘  读压缩视图   └──────────────┘
+                               │        ↑
+                               │分发    │写 findings
+                               ▼        │
+                         ┌──────────┐   │
+                         │ Worker×N │   │  同域多实例
+                         │ 执行任务  │───┘  不同攻击方向
+                         └──────────┘
+                               │
+                               ▼ Worker 输出
+                    ┌─────────────────────┐
+                    │   Context Manager   │  信息质量控制
+                    │  Phase 1: Filter    │  规则, 免费
+                    │  Phase 2: Compact   │  LLM, 阈值触发
+                    └─────────────────────┘
+                               │
+                               ▼ 干净数据 + 摘要
+                    ┌─────────────────────┐
+                    │     Blackboard      │  信息交换 + 短期记忆
+                    │                     │  只存当前运行状态
+                    └─────────────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    ▼                     ▼
+            ┌──────────────┐    ┌──────────────────┐
+            │  Evaluator   │    │     Memory       │
+            │  方向纠偏     │    │   跨运行持久知识   │
+            │  写提醒notes  │    │   待实现(RAG)     │
+            └──────────────┘    └──────────────────┘
+                    │
+                    ▼ Blackboard (observer_notes)
+              Commander 下轮读到
 ```
 
-## 1. Component Contracts
+---
 
-### Commander — "Reads state, decides next actions"
-| | |
-|---|---|
-| **File** | `commander/agent.py` |
-| **Input** | `dict` — `get_commander_view()` from Blackboard |
-| **Output** | `dict` — `{decision, reasoning, new_tasks[], final_summary}` |
-| **LLM** | Yes — single call per round, `response_format={"type": "json_object"}` |
-| **Tools** | None |
-| **Depends on** | `config`, `utils` |
-| **Must NOT** | Import Worker, call tools, execute anything |
-| **Contract** | Returns structured dict on error too (never raises) |
+## 1. Module Contracts — "Each module does ONE thing"
 
-### Worker — "Executes one task, returns findings"
-| | |
-|---|---|
-| **Base class** | `workers/base_worker.py::BaseWorker` |
-| **Return type** | `TaskResult` (status, summary, output_data, findings, error_detail) |
-| **Finding type** | `WorkerFinding` (type, title, data, confidence, source_task_id) |
-| **LLM** | Yes — tool-calling loop, max 8 iterations |
-| **Tools** | Yes — via `ToolRegistry` |
-| **Depends on** | `config`, `utils`, `tools` |
-| **Must NOT** | Import Commander, create tasks, decide strategy |
-| **Contract** | `execute(task: dict, snapshot: dict) -> TaskResult` |
-
-### Blackboard — "Stores and serves state"
+### Blackboard — "信息交换 + 短期记忆"
 | | |
 |---|---|
 | **File** | `blackboard/blackboard.py` |
-| **Role** | Single source of truth. Findings are append-only. |
-| **Persistence** | JSON file, atomic write |
+| **Schema** | `blackboard/schema.py` — all system data types |
+| **Role** | Single source of truth for the current run. Stores and serves state. |
+| **Persistence** | JSON file, atomic write. Cleared between runs. |
 | **Views** | `snapshot()` — full (for Workers); `get_commander_view()` — compressed (for Commander) |
 | **Depends on** | `blackboard/schema.py` only |
-| **Must NOT** | Import Commander, Worker, or any agent |
+| **Must NOT** | Compress data, make quality judgments, call LLM, import any agent |
+| **Key rule** | Findings are append-only. Compaction writes to separate summary field. |
 
-### Filter — "Cleans findings without dropping data"
+### Commander — "读状态，定方向，分配 Worker"
 | | |
 |---|---|
-| **File** | `filter/cleaner.py` |
-| **Hook** | `after_execute` |
-| **Operations** | Dedup (type+title), normalize, mark large data |
-| **LLM** | No — pure rules, zero cost |
-| **Rule** | **Never drops findings.** No confidence-based deletion. |
+| **File** | `commander/agent.py` |
+| **Input** | `CommanderView` — compressed: summary + recent findings + observer_notes + stats |
+| **Output** | `Decision` dataclass — validated (decision, reasoning, directions[], final_summary) |
+| **LLM** | Yes — single call per round, `response_format={"type": "json_object"}` |
+| **Tools** | None |
+| **Depends on** | `config`, `utils`, `blackboard.schema` |
+| **Must NOT** | Execute tools, talk to Workers directly, import Worker |
+| **New in v2** | Allocates **directions** (not individual tasks). Each direction = one Worker instance. Can output "hold" to skip a round. |
 
-### Compactor — "Summarizes accumulated findings"
+### Worker — "接收一个方向，执行一组任务"
 | | |
 |---|---|
-| **Location** | `Blackboard.compact()` method |
-| **Trigger** | `_needs_compact()` — findings data > 3000 chars |
-| **LLM** | Yes — generates `situation_summary` dict |
-| **Rule** | Writes to separate field. Original findings untouched. |
-| **Failure** | Non-critical — fails silently, Commander gets larger view |
+| **Base class** | `workers/base_worker.py::BaseWorker` |
+| **Return type** | `TaskResult` (enforced — no dict fallback) |
+| **LLM** | Yes — tool-calling loop, max 8 iterations |
+| **Tools** | Yes — via `ToolRegistry` |
+| **Depends on** | `config`, `utils`, `tools`, `blackboard.schema` |
+| **Must NOT** | Import Commander, decide strategy, talk to other Workers |
+| **New in v2** | Multiple instances of the same domain Worker run in parallel, each with a different attack direction. Worker is stateless — all state lives on Blackboard. |
 
-### Engine — "Drives the loop"
+### Engine — "驱动循环，按方向并行分发"
 | | |
 |---|---|
 | **File** | `orchestrator/engine.py` |
-| **Role** | Only file that imports both Commander and Worker |
-| **Loop** | Commander.plan → create tasks → Worker.execute → Filter → compact → repeat |
+| **Role** | Only file that imports both Commander and Worker. Sole coupling point. |
+| **Loop** | Commander.plan → launch Workers per direction → Context Manager → Evaluator → repeat |
+| **New in v2** | Groups tasks by direction. Same-direction tasks run serial. Different directions run parallel. Max workers configurable. |
 
-### Hook System
+### Context Manager — "信息质量控制"
 | | |
 |---|---|
-| **File** | `hooks.py` |
-| **Events** | before_plan, after_plan, before_task_create, before_execute, after_execute, on_finding, on_complete |
-| **Usage** | `@on("event_name")` decorator + `event.block("reason")` |
+| **Location** | `context/` module (new) |
+| **Phase 1 — Filter** | Rule-based. Dedup (type+title), normalize, mark large data. **Never drops findings.** |
+| **Phase 2 — Compact** | LLM-based. Threshold-triggered (>3000 chars). Generates structured summary with explicit PRESERVE/DISCARD rules. |
+| **LLM** | Only Phase 2 |
+| **Hook** | `after_execute` |
+| **Output** | Cleaned findings + situation_summary → Blackboard |
+
+### Evaluator — "策略评估 + 方向纠偏"
+| | |
+|---|---|
+| **Location** | `evaluator/` module (new) |
+| **Role** | Reads recent N rounds of execution traces. Detects drift, repeated failures, stale directions. Writes observer_notes to Blackboard for Commander. |
+| **LLM** | Optional — primarily rule-based. Can call LLM for complex judgment. |
+| **Hook** | New hook: `after_round` |
+| **Output** | `observer_notes` — reminders and suggestions → Blackboard |
+| **Must NOT** | Execute tasks, modify findings, make Commander decisions |
+
+### Monitor — "横切度量"
+| | |
+|---|---|
+| **Location** | `monitor/` module (new) |
+| **Role** | Pure observer — reads only, never writes to Blackboard. Tracks token usage, round timing, success/failure ratios, direction distribution. |
+| **LLM** | No |
+| **Hooks** | `before_plan`, `after_execute`, `on_complete` |
+| **Output** | Final report statistics section |
+
+### Memory — "跨运行持久知识"
+| | |
+|---|---|
+| **Location** | `memory/` module (future) |
+| **Role** | Stores confirmed findings across runs. RAG-retrievable. Not active in current session — purely for future runs. |
+| **Status** | Deferred — not in v2 MVP |
 
 ---
 
 ## 2. Information Flow
 
 ```
-                      Commander (compressed view)
-                      ▲
-                      │  get_commander_view():
-                      │  ├── situation_summary (LLM compacted)
-                      │  ├── pending_tasks
-                      │  ├── recent_tasks (10, with error_detail)
-                      │  ├── recent_findings (5, truncated)
-                      │  ├── stats
-                      │  └── recent_events (10)
-                      │
-Worker.execute(task, full_snapshot)  ←── Worker gets ALL findings (needs detail)
-                      │
-                      ▼
-                TaskResult
-                      │
-                      ├── Filter (after_execute): dedup + normalize + mark
-                      │
-                      ▼
-                Blackboard.add_finding()
-                      │
-                      ├── Duplicate check: (type, title) match → boost confidence
-                      │      + confirmed_by counter
-                      │
-                      ▼
-                complete_task(output_data + error_detail)
-                      │
-                      ▼
-                _maybe_compact()
-                      │  threshold: findings data > 3000 chars
-                      │  input: all findings + failed tasks
-                      │  output: situation_summary dict
-                      │
-                      ▼
-                Next round: Commander sees updated summary + error history
-```
-
-### Data format: Finding
-```python
-{
-    "type": "asset|vulnerability|flag|credential|info",
-    "title": "human-readable one-liner",
-    "data": {...},          # raw evidence, truncated for display if >500 chars
-    "confidence": 0.0-1.0,  # boosted on duplicate confirmation
-    "confirmed_by": 0,       # how many tasks confirmed this
-    "source_task_id": "...",
-}
-```
-
-### Data format: TaskResult
-```python
-{
-    "status": "completed|failed",
-    "summary": "...",
-    "output_data": {...},
-    "findings": [WorkerFinding, ...],
-    "error_detail": {           # only on failure
-        "error_type": "network_error|auth_failed|tool_error|...",
-        "detail": "human-readable",
-        "exception": "ExceptionClassName",
-    }
-}
+Round N:
+  Commander reads CommanderView {
+      situation_summary    ← Context Manager Phase 2 产出
+      recent_findings      ← Context Manager Phase 1 清洗后
+      observer_notes       ← Evaluator 上轮产出
+      stats, tasks, events
+  }
+  Commander outputs Decision {
+      decision: "continue" | "hold" | "completed" | "failed"
+      directions: [
+          {name: "sqli", tasks: [...], handoff: "..."},
+          {name: "xss",  tasks: [...], handoff: "..."},
+      ]
+  }
+      │
+      ▼
+  Engine launches Workers parallel by direction:
+      Worker#1.execute(direction="sqli", tasks=[...])
+      Worker#2.execute(direction="xss",  tasks=[...])
+      │
+      ▼ Worker outputs TaskResult (findings mostly "suspected")
+      │
+      ├── Context Manager Phase 1 (Filter):
+      │       dedup + normalize + mark
+      │
+      ├── Context Manager Phase 2 (Compact):
+      │       阈值触发 → LLM 结构化摘要
+      │
+      ▼ 写入 Blackboard
+      │
+      ├── Evaluator (after_round):
+      │       读最近 N 轮轨迹
+      │       检测: 重复试错 / 方向偏移 / 停滞
+      │       写 observer_notes → Blackboard
+      │
+      ▼
+Round N+1: Commander 看到 observer_notes + 新数据, 继续或纠偏
 ```
 
 ---
 
-## 3. Worker Paradigm
+## 3. Data Types (all in `blackboard/schema.py`)
 
-### 3.1 BaseWorker Contract
-
-Every Worker MUST:
-- Extend `BaseWorker` (`workers/base_worker.py`)
-- Implement `execute(task: dict, snapshot: dict) -> TaskResult`
-- Return `TaskResult` with `error_detail` on failure (structured, not just "failed")
-- Define `name` and `domain` class attributes
-- NOT import Commander or any other agent
-
-### 3.2 Template: Adding a New Worker
-
-**Step 1 — Create directory structure**
-```
-workers/<domain>/
-├── agent.py
-├── prompts/
-│   └── system_prompt.txt
-└── __init__.py
-```
-
-**Step 2 — Implement worker** (`workers/<domain>/agent.py`)
+### Finding — 加 status 语义区分
 ```python
-from config import DEEPSEEK_MODEL, create_client
-from utils import extract_json, retry_llm_call
-from workers.base_worker import BaseWorker, TaskResult, WorkerFinding
-from tools.registry import get_registry
-
-class CryptoWorker(BaseWorker):
-    name = "crypto_worker"
-    domain = "crypto"
-
-    def __init__(self, model=None):
-        self.model = model or DEEPSEEK_MODEL
-        self._client = create_client(model)
-        self.tools = get_registry().get_multi(["crypto", "shared"])
-        # Load system prompt from prompts/system_prompt.txt
-
-    def execute(self, task: dict, snapshot: dict) -> TaskResult:
-        # 1. Build messages from task + snapshot
-        # 2. Call LLM tool-calling loop (max 8)
-        # 3. Parse final output → TaskResult.from_dict()
-        # 4. On exception → self._build_failure() with structured error_detail
-        pass
-
-    def _build_failure(self, task_id, instruction, exc) -> TaskResult:
-        # Classify error type and return structured TaskResult
-        pass
+{
+    "type": "asset|vulnerability|flag|credential|info",
+    "title": "human-readable one-liner",
+    "data": {...},
+    "confidence": 0.0-1.0,
+    "status": "suspected|confirmed|dead_end",  # NEW
+    "source_task_id": "...",
+    "direction": "sqli",  # NEW — which attack direction
+}
 ```
 
-**Step 3 — Write system prompt** (`workers/<domain>/prompts/system_prompt.txt`)
-- Persona: what this worker is, what it can do
-- Authority: tools it can use, what it CANNOT do
-- Output format: CRITICAL — "Output ONLY JSON, no other text"
-- Finding types relevant to this domain
+- `suspected` — Worker 产出的初始猜测
+- `confirmed` — 重复验证或跨任务确认
+- `dead_end` — 多次尝试无果，Evaluator 标记
 
-**Step 4 — Create domain tools** (`tools/<domain>/`)
+### Decision — Commander 输出（已实现）
 ```python
-from tools.registry import register_tool
-
-@register_tool(category="crypto", description="Decrypt AES-CBC ciphertext")
-def aes_decrypt(ciphertext: str, key: str, iv: str) -> dict:
-    ...
+@dataclass
+class Decision:
+    decision: str           # "continue" | "hold" | "completed" | "failed"
+    reasoning: str
+    directions: list[dict]  # NEW — [{name, tasks, handoff}, ...]
+    final_summary: str
 ```
 
-**Step 5 — Import tools** in `tools/__init__.py`:
-```python
-import tools.crypto.decrypt  # @register_tool fires on import
-```
-
-**Step 6 — Register worker** in `orchestrator/engine.py::__init__()`:
-```python
-from workers.crypto.agent import CryptoWorker
-reg.register(CryptoWorker(model=model), name="crypto_worker",
-             domain="crypto", task_prefixes=["crypto_"])
-```
-
-**Step 7 — Export** in `workers/__init__.py`
-
-**Step 8 — Commander needs ZERO changes** — task_prefixes handle routing.
-
-### 3.3 Worker System Prompt Rules
-
-- **CRITICAL: Output ONLY the JSON object.** No markdown, no text before/after.
-- Worker CAN call tools repeatedly to investigate
-- Worker CANNOT create tasks or decide overall strategy
-- Worker MUST report findings with appropriate confidence levels
-- On failure: explain what went wrong specifically (not "it failed")
+### TaskResult — Worker 合约（已实现，已迁至 schema.py）
+### WorkerFinding — Worker 产出（已实现，已迁至 schema.py）
 
 ---
 
 ## 4. Architecture Rules
 
 ### Module Independence
-- Commander ⇎ Worker: zero imports of each other. Communication only via Blackboard.
+- Commander ⇎ Worker: zero imports. Communication only via Blackboard.
 - Engine is the sole coupling point.
+- Context Manager, Evaluator, Monitor: each independent, hook into Engine events.
 - Blackboard depends on nothing outside its own schema.
-- Tools are pure functions with type hints. No state, no LLM calls.
+- Tools are pure functions. No state, no LLM calls.
 
-### Finding Lifecycle
-1. Worker creates `WorkerFinding` (no id/timestamp)
-2. Filter deduplicates within task output
-3. Engine converts to dict → `Blackboard.add_finding()`
-4. Blackboard assigns id + timestamp → `Finding` dataclass
-5. Cross-task duplicate check → confidence boost if matching (type, title)
-6. Findings are **append-only** — never modified after creation (except confidence boost)
+### Finding Lifecycle (v2)
+1. Worker creates `WorkerFinding` (status defaults to `suspected`)
+2. Context Manager Phase 1 (Filter): dedup + normalize
+3. Engine writes to Blackboard → `Finding` dataclass (id + timestamp added)
+4. Cross-task duplicate → confidence boost, status upgraded to `confirmed`
+5. Evaluator detects repeated failures → status marked `dead_end`
+6. Findings are **append-only** — modified only via confidence boost and status transitions
 
-### LLM Call Points (only 3 in system)
-| Caller | Purpose | Retry |
-|---|---|---|
-| Commander | Decide next actions (1 call/round) | Yes |
-| Worker | Tool-calling loop (≤8 calls/task) | Yes |
-| Compactor | Summarize findings (threshold-triggered) | No (non-critical) |
+### LLM Call Points (v2)
+| Caller | Purpose | Retry | Cost |
+|---|---|---|---|
+| Commander | Decide directions (1 call/round) | Yes | 付费 |
+| Worker | Tool-calling loop (≤8 calls/task) | Yes | 付费 |
+| Context Manager Phase 2 | Summarize findings (threshold) | Yes | 付费 |
+| Evaluator | Complex drift judgment (optional) | No | 按需 |
 
 ### Context Budget
-- Commander: summary + 5 recent findings + 10 recent tasks + stats + 10 events
-- Worker: full snapshot (all findings, all tasks — Worker needs detail)
-- Compaction threshold: >3000 chars of findings data
+- Commander: summary + 5 recent findings + observer_notes + stats + events
+- Worker: full snapshot (needs detail to execute)
+- Compaction threshold: >3000 chars findings data
 
 ### Error Handling
 - Commander.plan() and Worker.execute(): never raise, return structured result
 - Worker failure: `TaskResult(status="failed")` with `error_detail`
 - Compactor failure: logged, execution continues
-- Hook exceptions: caught and logged, event continues
+- Evaluator failure: logged, execution continues (non-critical)
+- Hook exceptions: caught and logged
 
 ### What NOT to do
-- Don't add modules that do more than one thing
+- Don't let modules do more than one thing
 - Don't let Commander and Worker import each other
-- Don't truncate findings by deleting data (mark, don't drop)
-- Don't add LLM call points without retry (except Compactor)
-- Don't modify findings after they're written to Blackboard
+- Don't drop findings — mark status instead
+- Don't add LLM calls without retry (except Evaluator optional calls)
+- Don't modify findings after Blackboard write (except status transitions)

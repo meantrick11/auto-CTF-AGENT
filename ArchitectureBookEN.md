@@ -65,7 +65,7 @@ The standard operational lifecycle of the system is as follows:
 - **Worker contract**: `execute()` MUST return `TaskResult`. Engine normalizes both TaskResult and plain dicts for backward compat with hook modifications.
 
 ### Deferred (match blueprint §6 steps 3 & 5)
-- **Filter (Data Washer)**: Hook point ready (`after_execute`). No implementation yet.
+- **Filter (Data Washer)**: Implemented — hooks into `after_execute`, dedup + normalize + truncate-mark. Rule-based, no LLM.
 - **Guardrail (Safety Shield)**: 3 hook points ready (`before_plan`, `before_task_create`, `before_execute`). No implementation yet.
 - **Multi-domain Workers**: Web only. Crypto/RE/PWN/Forensics not started.
 - **Concurrency**: Serial loop only. Blueprint's "stateless execution nodes" imply parallel execution — not yet.

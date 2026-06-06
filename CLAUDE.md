@@ -48,20 +48,22 @@ Call `event.block("reason")` to stop execution. Modify `event.data` to mutate pa
 
 Key files: `hooks.py` (HookEvent + HookRegistry), `orchestrator/engine.py` (7 fire points).
 
-## Architecture (9 modules)
+## Architecture (v2 — 9 modules + new modules being added)
 
 ```
 main.py → orchestrator/engine.py  ←── the ONLY coupling point
-              ├── commander/agent.py           (depends: config, utils)
+              ├── commander/agent.py           (depends: config, utils, blackboard.schema)
               ├── workers/registry.py          (depends: workers/base_worker.py)
               ├── workers/web/agent.py         (depends: config, utils, tools, base_worker)
-              ├── filter/cleaner.py            (hook: after_execute — rule-based)
-              ├── guardrail/                   (hooks: before_plan, before_task_create, before_execute)
-              └── blackboard/                  (depends: NOTHING — includes compaction)
+              ├── context/                     (NEW v2 — Filter + Compactor merged)
+              ├── evaluator/                   (NEW v2 — drift detection)
+              ├── monitor/                     (NEW v2 — metrics)
+              ├── guardrail/                   (placeholder — hooks: before_plan, before_task_create, before_execute)
+              └── blackboard/                  (depends: NOTHING — pure storage. Compactor moved to context/)
 ```
 
 **Key rule:** Commander and Worker are 100% independent. No direct import or communication.
-All coordination through Blackboard: Commander writes Tasks → Worker writes Findings.
+All coordination through Blackboard: Commander writes Directions → Workers write Findings.
 
 ### Module Responsibility Principle
 
@@ -69,11 +71,13 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 
 | Module | One Thing |
 |---|---|
-| Commander | Read state → decide next actions |
-| Worker | Execute one task → return findings |
-| Blackboard | Store and serve state (append-only) |
-| Filter | Clean findings without dropping data (rules, no LLM) |
-| Compactor | Summarize accumulated findings (LLM, threshold-triggered) |
+| Commander | Read state → decide attack directions |
+| Worker | Execute one direction → return findings |
+| Blackboard | Store and serve state — information exchange + short-term memory |
+| Context Manager | Maintain information quality: Filter (rules) + Compact (LLM) |
+| Evaluator | Detect drift, mark dead ends, remind Commander |
+| Monitor | Track metrics: tokens, timing, success rates |
+| Memory | Persist knowledge across runs (future) |
 | Engine | Drive the loop (sole coupling point) |
 | ToolRegistry | Register and dispatch tools |
 | WorkerRegistry | Register and route workers |
@@ -124,12 +128,32 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 | `tools/web/recon.py` | web_directory_scan, web_extract_forms, web_analyze_headers |
 | `tools/web/exploit.py` | web_sqli_test, web_xss_test, web_command_injection_test |
 
-### Filter (Data Washer — implemented)
+### Filter (Data Washer — implemented, → merging into Context Manager)
 | File | Role |
 |---|---|
 | `filter/cleaner.py` | Rule-based: dedup by (type,title), normalize fields, mark large data. Hooks into after_execute. |
 | `filter/__init__.py` | Imports cleaner to register hook. |
 | `filter/README.md` | Full spec: hook point, operations, what Filter does NOT do. |
+
+### Context Manager (new v2 — merging Filter + Compactor)
+| File | Role |
+|---|---|
+| `context/` | Information quality control. Phase 1: Filter (rules). Phase 2: Compact (LLM, threshold). |
+
+### Evaluator (new v2)
+| File | Role |
+|---|---|
+| `evaluator/` | Strategy assessment. Rule-based drift detection, dead-end marking. Writes observer_notes → Blackboard. |
+
+### Monitor (new v2)
+| File | Role |
+|---|---|
+| `monitor/` | Cross-cutting metrics. Token usage, timing, success rate. Read-only. |
+
+### Memory (future)
+| File | Role |
+|---|---|
+| `memory/` | Cross-run persistent knowledge. RAG-retrievable. Deferred. |
 
 ### Guardrail (Safety Shield — placeholder)
 | File | Role |
@@ -146,10 +170,11 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 | `ArchitectureBookEN.md` | Full architecture design document (the blueprint) |
 | `ArchitectureBookCN.md` | Chinese version |
 
-### Testing
+### Targets (local test range)
 | File | Role |
 |---|---|
-| `test_target.py` | Local vulnerable web server (port 8888). Has SQLi, base64 leaks, source exposure. Python stdlib only. |
+| `targets/README.md` | Target catalog: vulnerability matrix, attack chain, how to add new targets |
+| `targets/test_target.py` | CTF Corp Portal — 14 endpoints, multi-step CTF (SQLi, XSS, CI, info leak, auth bypass) |
 
 ### Hook System
 | File | Role |
@@ -161,19 +186,37 @@ All coordination through Blackboard: Commander writes Tasks → Worker writes Fi
 |---|---|
 | `utils.py` | `extract_json()` bracket-counting JSON extractor + `retry_llm_call()` exponential backoff retry |
 
+## Virtual Environment (MANDATORY)
+
+**ALL Python operations MUST run inside `.venv`.** This includes `python`, `pip install`, `pytest`, and any other Python commands.
+
+```powershell
+# Activate (PowerShell) — do this FIRST in every terminal
+.\.venv\Scripts\Activate.ps1
+
+# If blocked by execution policy (one-time fix, Run as Administrator):
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Rules:
+- **Never run `pip install` globally** — always activate venv first
+- **Never use `pip3`** on Windows — use `pip` (venv's pip)
+- **Check prompt shows `(.venv)`** before running anything
+- **When adding dependencies**: `pip install <pkg> && pip freeze > requirements.txt` to keep lock file updated
+
 ## How to Run
 
 ```powershell
 # One-time setup
-cp .env.example .env   # then edit .env with real DeepSeek key
 .\.venv\Scripts\Activate.ps1
+cp .env.example .env   # then edit .env with real DeepSeek key
 pip install -r requirements.txt
 
 # Simple test (no target needed)
 python main.py -g "Decode this base64: ZmxhZ3tmYWpka2xmamFvZmpxZWlmXzEzMjE0YWZsZmFpb30=" -n 5
 
 # Full attack (needs target)
-# Terminal 1: python test_target.py
+# Terminal 1: python targets/test_target.py
 # Terminal 2: python main.py -g "Attack http://localhost:8888 and capture the flag" -n 8
 ```
 
@@ -254,6 +297,25 @@ These were discovered through debugging. Violating any of them breaks the system
 - Each module has a `README.md` documenting: role, files, input/output protocols.
 - System prompts live in `prompts/` subdirectories, loaded at runtime (not hardcoded).
 - `__init__.py` files export public API of each module.
+
+### Session Discipline (MANDATORY)
+
+1. **After every confirmed change, update the corresponding records or README files.** Never leave documentation stale after code changes. See the Documentation Discipline table below for the specific update rules.
+2. **Before modifying a module: if the implementation approach is uncertain, or it's unclear whether something should be reserved for future use, ask the user first and wait for instructions.** Do NOT assume, fantasize, or make unilateral decisions (including but not limited to: committing code, deleting files, changing architecture conventions). Ask first, then act.
+
+### Documentation Discipline (MANDATORY after every change)
+
+| When you... | You MUST update... |
+|---|---|
+| Add/remove a file in a module | That module's `README.md` — file listing and roles |
+| Add a new tool | `tools/README.md` — add to tool table |
+| Change a module's interface/contract | That module's `README.md` + `docs/SPEC.md` if it's a core contract |
+| Fix a tricky bug or discover a new rule | `CLAUDE.md` — add to Coding Conventions so it never repeats |
+| Complete a work session | `PROGRESS.md` — date, what was done, why |
+| Change Commander/Worker behavior | Respective `prompts/system_prompt.txt` if prompt needs updating |
+| Add a new module | Create its `README.md` (following existing format) + add to this file index |
+
+**Why:** Code tells you what it does, but README tells you WHY and HOW to use it. Stale docs are worse than no docs — they actively mislead.
 
 ## Adding a New Worker (future reference)
 

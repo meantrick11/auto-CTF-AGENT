@@ -10,7 +10,7 @@ The single source of truth for the entire system. All agents read from and write
 
 | File | Role |
 |---|---|
-| `schema.py` | Data model definitions (Goal, Task, Finding, EventLog) |
+| `schema.py` | All system data types: Goal, Task, Finding, EventLog, Decision, WorkerFinding, TaskResult |
 | `blackboard.py` | CRUD + JSON persistence + compaction + commander view |
 
 ## Data Models
@@ -34,6 +34,20 @@ The single source of truth for the entire system. All agents read from and write
 
 ### EventLog
 - `timestamp`, `agent_name`, `action`, `detail`
+
+### Decision (Commander → Engine contract)
+- `decision` ("continue" | "completed" | "failed"), `reasoning`, `new_tasks`, `final_summary`
+- `from_llm_output(dict)` — validates LLM output, raises ValueError on invalid decision value
+- `Decision.failed(reason)` — convenience factory for error states
+
+### WorkerFinding (Worker → Engine contract, pre-enrichment)
+- `type` (asset/vulnerability/flag/credential/info), `title`, `data`, `confidence`, `source_task_id`
+- Engine enriches into `Finding` (adds id + timestamp) before writing to blackboard
+
+### TaskResult (Worker → Engine contract)
+- `status` ("completed" | "failed"), `summary`, `output_data`, `findings: list[WorkerFinding]`, `error_detail`
+- `to_dict()` / `from_dict(d)` — serialization for JSON persistence
+- ALL Worker.execute() calls MUST return this type
 
 ## API Surface
 

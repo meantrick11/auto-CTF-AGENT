@@ -40,20 +40,18 @@ Commander receives `get_commander_view()` from the blackboard — a compressed v
 
 ## Output Protocol
 
+Commander returns a `Decision` dataclass (defined in `blackboard/schema.py`). Engine accesses typed attributes — no `.get()` fallbacks.
+
 ```python
-{
-    "decision": "continue",       # continue | completed | failed
-    "reasoning": "...",
-    "new_tasks": [
-        {
-            "type": "web_exploit",
-            "instruction": "Clear natural language instruction",
-            "input_data": {"url": "..."}
-        }
-    ],
-    "final_summary": ""           # filled when decision is completed/failed
-}
+@dataclass
+class Decision:
+    decision: str          # "continue" | "completed" | "failed"
+    reasoning: str = ""
+    new_tasks: list[dict]  # [{type, instruction, input_data}, ...]
+    final_summary: str = ""
 ```
+
+`Decision.from_llm_output(dict)` validates that `decision` is exactly one of the three allowed values. A typo like `"complete"` raises `ValueError` instead of being silently ignored. `Decision.failed(reason)` is the convenience factory for error states.
 
 ## Commander's Authority
 

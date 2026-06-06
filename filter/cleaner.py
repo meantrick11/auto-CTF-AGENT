@@ -23,7 +23,7 @@ def filter_worker_output(event):
         return
 
     # Normalize to TaskResult
-    from workers.base_worker import TaskResult
+    from blackboard.schema import TaskResult
     if isinstance(result, TaskResult):
         task_result = result
     elif isinstance(result, dict):

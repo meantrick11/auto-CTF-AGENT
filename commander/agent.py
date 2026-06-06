@@ -5,6 +5,7 @@ import os
 
 from config import DEEPSEEK_MODEL, create_client
 from utils import extract_json, retry_llm_call
+from blackboard.schema import Decision
 
 
 class Commander:
@@ -23,28 +24,18 @@ class Commander:
         with open(prompt_path, "r", encoding="utf-8") as f:
             self._system_prompt = f.read()
 
-    def plan(self, snapshot: dict) -> dict:
+    def plan(self, snapshot: dict) -> Decision:
         """Analyze blackboard state and decide next actions.
 
         Returns:
-            {
-                "decision": "continue" | "completed" | "failed",
-                "reasoning": "...",
-                "new_tasks": [{type, instruction, input_data}, ...],
-                "final_summary": "..."
-            }
+            Decision with decision, reasoning, new_tasks, and final_summary.
         """
         user_message = self._build_snapshot_message(snapshot)
 
         try:
             return self._call_llm(user_message)
         except Exception as exc:
-            return {
-                "decision": "failed",
-                "reasoning": f"Commander error: {exc}",
-                "new_tasks": [],
-                "final_summary": "",
-            }
+            return Decision.failed(f"Commander error: {exc}")
 
     def _build_snapshot_message(self, snapshot: dict) -> str:
         goal = snapshot.get("goal", {})
@@ -152,7 +143,7 @@ class Commander:
 
         return "\n".join(parts)
 
-    def _call_llm(self, user_message: str) -> dict:
+    def _call_llm(self, user_message: str) -> Decision:
         response = retry_llm_call(
             lambda: self._client.chat.completions.create(
                 model=self.model,
@@ -168,13 +159,13 @@ class Commander:
         text = response.choices[0].message.content or ""
         return self._parse_output(text)
 
-    def _parse_output(self, text: str) -> dict:
+    def _parse_output(self, text: str) -> Decision:
         result = extract_json(text)
         if result:
-            return result
-        return {
-            "decision": "failed",
-            "reasoning": f"Could not parse Commander output: {text[:300]}",
-            "new_tasks": [],
-            "final_summary": "",
-        }
+            try:
+                return Decision.from_llm_output(result)
+            except ValueError as exc:
+                return Decision.failed(str(exc))
+        return Decision.failed(
+            f"Could not parse Commander output: {text[:300]}"
+        )

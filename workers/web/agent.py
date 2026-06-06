@@ -6,7 +6,8 @@ import os
 from config import DEEPSEEK_MODEL, create_client
 from utils import extract_json, retry_llm_call
 
-from workers.base_worker import BaseWorker, TaskResult
+from workers.base_worker import BaseWorker
+from blackboard.schema import TaskResult
 from tools.registry import get_registry
 
 

@@ -15,6 +15,7 @@ The muscle layer. Tools are pure functions that perform actual operations (netwo
 
 | File | Role | Input | Output |
 |---|---|---|---|
+| `__init__.py` | **CRITICAL** — imports all tool modules so `@register_tool` decorators fire | — | — |
 | `registry.py` | Central tool registry with decorator-based registration | — | ToolDef list for LLM function calling |
 | `shared/encoding.py` | Encode/decode utilities | String + format | Transformed string |
 | `shared/network.py` | Basic HTTP and socket operations | URL + params | Response dict |

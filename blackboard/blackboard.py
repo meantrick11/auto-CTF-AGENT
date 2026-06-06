@@ -290,17 +290,19 @@ class Blackboard:
             )
 
         try:
-            response = client.chat.completions.create(
-                model=model,
-                max_tokens=1024,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
+            from utils import extract_json, retry_llm_call
+            response = retry_llm_call(
+                lambda: client.chat.completions.create(
+                    model=model,
+                    max_tokens=1024,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                )
             )
             text = response.choices[0].message.content or ""
-            from utils import extract_json
             parsed = extract_json(text)
             if parsed:
                 self._situation_summary = parsed

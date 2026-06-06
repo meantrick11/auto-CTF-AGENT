@@ -17,9 +17,9 @@ The main event loop that wires all components together. **Does one thing: drives
 2. for round in 1..max_rounds:
    a. [hook: before_plan]
    b. commander_view = blackboard.get_commander_view()   ← compressed view
-   c. decision = commander.plan(commander_view)
+   c. decision = commander.plan(commander_view)          ← returns Decision dataclass
    d. [hook: after_plan]
-   e. if decision is "completed" or "failed": break
+   e. if decision.decision is "completed" or "failed": break
    f. for each new_task:
         [hook: before_task_create]
         blackboard.create_task(...)
@@ -44,6 +44,9 @@ The main event loop that wires all components together. **Does one thing: drives
 - Triggered after all tasks in a round are done, before next Commander.plan()
 - Threshold: findings data total > 3000 chars
 - LLM generates structured summary, stored separately (original findings untouched)
+
+### TaskResult Enforcement
+Engine requires `Worker.execute()` to return `TaskResult` (no dict fallback). If a Worker violates this contract, attribute errors surface immediately rather than being silently swallowed.
 
 ### Worker Routing
 Uses `WorkerRegistry` (singleton). Each worker registers with `task_prefixes` (e.g. `["web_"]`). `_route_task()` calls `registry.route(task_type)` with fallback to `web_worker`. No hardcoded if/elif chains.

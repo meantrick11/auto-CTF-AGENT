@@ -1,79 +1,9 @@
 """Base worker interface — all domain workers extend this."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 
 from tools.registry import ToolDef
-
-
-@dataclass
-class WorkerFinding:
-    """Standard finding produced by a Worker. Engine enriches it into a blackboard Finding."""
-
-    type: str  # "asset" | "vulnerability" | "flag" | "credential" | "info"
-    title: str
-    data: dict = field(default_factory=dict)
-    confidence: float = 1.0
-    source_task_id: str = ""
-
-
-@dataclass
-class TaskResult:
-    """Standard return type for ALL Worker.execute() calls.
-
-    Every Worker MUST return a TaskResult.
-    This is the contract between Action Plane and the rest of the system.
-    Filter, Blackboard, and Engine all depend on this shape.
-    """
-
-    status: str  # "completed" | "failed"
-    summary: str = ""
-    output_data: dict = field(default_factory=dict)
-    findings: list[WorkerFinding] = field(default_factory=list)
-    error_detail: dict | None = None
-    # error_detail shape (on failure):
-    #   {"error_type": "network_error|auth_failed|tool_error|max_iterations|...",
-    #    "status_code": 403,
-    #    "detail": "human-readable description",
-    #    "last_action": "what was being attempted"}
-
-    def to_dict(self) -> dict:
-        return {
-            "status": self.status,
-            "summary": self.summary,
-            "output_data": self.output_data,
-            "findings": [
-                {
-                    "type": f.type,
-                    "title": f.title,
-                    "data": f.data,
-                    "confidence": f.confidence,
-                    "source_task_id": f.source_task_id,
-                }
-                for f in self.findings
-            ],
-            "error_detail": self.error_detail,
-        }
-
-    @staticmethod
-    def from_dict(d: dict) -> "TaskResult":
-        findings = [
-            WorkerFinding(
-                type=f.get("type", "info"),
-                title=f.get("title", ""),
-                data=f.get("data", {}),
-                confidence=f.get("confidence", 1.0),
-                source_task_id=f.get("source_task_id", ""),
-            )
-            for f in d.get("findings", [])
-        ]
-        return TaskResult(
-            status=d.get("status", "failed"),
-            summary=d.get("summary", ""),
-            output_data=d.get("output_data", {}),
-            findings=findings,
-            error_detail=d.get("error_detail"),
-        )
+from blackboard.schema import TaskResult, WorkerFinding  # noqa: F401 — re-export
 
 
 class BaseWorker(ABC):

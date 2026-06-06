@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Any
 import inspect
+import re
 
 
 @dataclass
@@ -97,8 +98,18 @@ _TYPE_MAP = {
 }
 
 
+def _parse_param_descriptions(func: Callable) -> dict[str, str]:
+    """Extract parameter descriptions from docstring :param name: text lines."""
+    doc = func.__doc__ or ""
+    descriptions: dict[str, str] = {}
+    for match in re.finditer(r":param\s+(\w+)\s*:\s*(.+?)(?:\n|$)", doc):
+        descriptions[match.group(1)] = match.group(2).strip()
+    return descriptions
+
+
 def _build_json_schema(func: Callable) -> dict:
     sig = inspect.signature(func)
+    param_descs = _parse_param_descriptions(func)
     properties = {}
     required = []
 
@@ -109,6 +120,8 @@ def _build_json_schema(func: Callable) -> dict:
         json_type = _TYPE_MAP.get(py_type, "string")
 
         prop: dict = {"type": json_type}
+        if name in param_descs:
+            prop["description"] = param_descs[name]
         if param.default is not inspect.Parameter.empty:
             if isinstance(param.default, str):
                 prop["default"] = param.default

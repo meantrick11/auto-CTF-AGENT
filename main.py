@@ -41,7 +41,7 @@ def main():
 
     args = parser.parse_args()
 
-    validate_config()
+    validate_config()#检查是否有API key&base url
 
     engine = Engine(
         model=args.model,
@@ -66,7 +66,7 @@ def main():
     for f in report["findings"]:
         print(f"  [{f['type']}] {f['title']}")
 
-    if args.output:
+    if args.output:#如果指定了output file,则保存report到json文件
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         print(f"\nReport saved to: {args.output}")

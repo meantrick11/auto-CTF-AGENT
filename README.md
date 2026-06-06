@@ -39,7 +39,7 @@ python main.py -g "Decode this base64: ZmxhZ3t0ZXN0X2ZsYWd9" -n 5
 
 # 3. Full attack test — needs local target
 # Terminal 1:
-python test_target.py
+python targets/test_target.py
 # Terminal 2:
 python main.py -g "Attack http://localhost:8888 and capture the flag" -n 8
 ```
@@ -75,8 +75,7 @@ python main.py -g "goal description" [-n max_rounds] [-m model] [-o report.json]
 
 ## What's Deferred (not in MVP)
 
-- Filter agent (data noise reduction) — hook point ready: `after_execute`
-- Guardrail agent (safety checks) — 3 hook points ready: `before_plan`, `before_task_create`, `before_execute`
+- Guardrail agent (safety checks) — 3 hook points ready, not yet implemented
 - Cross-task memory / RAG knowledge base
 - Multi-domain workers (Crypto, RE, PWN, Forensics)
 - MCP external tool integration
@@ -90,7 +89,10 @@ CTFAgent/
 ├── main.py                  # CLI entry point
 ├── config.py                # API client, SSL, .env loading
 ├── utils.py                 # extract_json() helper
-├── test_target.py           # Local vulnerable HTTP server for testing
+│
+├── targets/                  # Local vulnerable test range
+│   ├── README.md             # Target catalog & attack chains
+│   └── test_target.py        # CTF Corp Portal (14 endpoints)
 ├── requirements.txt
 ├── .env.example
 │

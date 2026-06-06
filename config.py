@@ -13,7 +13,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 # SSL — set CTFAGENT_SSL_VERIFY=false in .env to disable (Windows proxy/AV workaround)
-SSL_VERIFY = os.getenv("CTFAGENT_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
+SSL_VERIFY = os.getenv("CTFAGENT_SSL_VERIFY", "true").lower() not in ("false", "0", "no")#not in for (str->bool)
 
 # Data
 DATA_DIR = os.getenv("CTFAGENT_DATA_DIR", "data")
@@ -38,7 +38,7 @@ def validate_config():
 
 def create_client(model: str | None = None) -> OpenAI:
     """Create an OpenAI-compatible client for DeepSeek with SSL config."""
-    http_client = httpx.Client(verify=SSL_VERIFY)
+    http_client = httpx.Client(verify=SSL_VERIFY)#need bool for verify, not str
     return OpenAI(
         base_url=DEEPSEEK_BASE_URL,
         api_key=DEEPSEEK_API_KEY,

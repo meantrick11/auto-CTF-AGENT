@@ -62,6 +62,7 @@ Task(
 - `web_analyze_headers` — Analyze security-relevant response headers
 - `web_sqli_test` — Test parameters for SQL injection vulnerabilities
 - `web_xss_test` — Test input points for XSS vulnerabilities
+- `web_command_injection_test` — Test parameters for command injection vulnerabilities
 
 ## System Prompt Principles
 

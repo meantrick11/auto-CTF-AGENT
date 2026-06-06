@@ -12,7 +12,7 @@ All Workers extend `BaseWorker` which defines the standard interface + enforced 
 
 | File | Role | Input | Output |
 |---|---|---|---|
-| `base_worker.py` | Abstract base + **TaskResult** + **WorkerFinding** dataclasses | — | — |
+| `base_worker.py` | Abstract BaseWorker ABC — behavioral contract only | — | — |
 | `registry.py` | Singleton WorkerRegistry. Prefix-based routing. Same pattern as ToolRegistry. | — | — |
 | `web/agent.py` | Web security specialist Worker | Task dict + blackboard snapshot | **TaskResult** |
 | `web/prompts/system_prompt.txt` | Web Worker persona and tool-use instructions | — | — |
@@ -32,7 +32,9 @@ class BaseWorker(ABC):
 
 ## TaskResult — The Worker Contract
 
-ALL `Worker.execute()` methods MUST return a `TaskResult`. This is the Action Plane schema contract. Filter, Blackboard, and Engine all depend on this shape.
+`TaskResult` and `WorkerFinding` are defined in `blackboard/schema.py` (canonical location for all system data types). `workers/base_worker.py` re-imports them for backward compat.
+
+ALL `Worker.execute()` methods MUST return a `TaskResult`. Engine enforces this — no dict fallback.
 
 ```python
 @dataclass
@@ -51,7 +53,7 @@ class WorkerFinding:
     source_task_id: str
 ```
 
-`TaskResult.from_dict(d)` bridges raw LLM JSON → structured object. Engine normalizes both TaskResult and plain dicts (backward compat for hook modifications).
+`TaskResult.from_dict(d)` bridges raw LLM JSON → structured object. Import from `blackboard.schema` in new code.
 
 ## WorkerRegistry — Registration & Routing
 

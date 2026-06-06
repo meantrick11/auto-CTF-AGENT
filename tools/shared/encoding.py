@@ -14,7 +14,11 @@ def base64_encode(data: str) -> str:
 
 @register_tool(category="shared", description="Decode a base64 string")
 def base64_decode(data: str) -> str:
-    return base64.b64decode(data.encode("utf-8")).decode("utf-8")
+    raw = base64.b64decode(data.encode("utf-8"))
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.hex()
 
 
 @register_tool(category="shared", description="Encode a string to hexadecimal")
@@ -24,7 +28,11 @@ def hex_encode(data: str) -> str:
 
 @register_tool(category="shared", description="Decode a hexadecimal string")
 def hex_decode(data: str) -> str:
-    return bytes.fromhex(data).decode("utf-8")
+    raw = bytes.fromhex(data)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.hex()
 
 
 @register_tool(category="shared", description="URL-encode a string")
