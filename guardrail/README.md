@@ -1,8 +1,9 @@
-# Guardrail — Safety Shield
+# Guardrail — DEPRECATED
 
-## Role
+**This module has been merged into `supervisor/`.**
+Safety logic now lives in `supervisor/safety.py`.
 
-Independent safety layer that audits all instructions flowing through the system. Operates at multiple interception points to ensure no dangerous operation executes without authorization. Runs **before** the main business logic — if Guardrail blocks, execution stops.
+See: `supervisor/README.md`
 
 Inspired by Claude Code: deny-first permission model, multiple independent safety layers, any layer can block.
 

@@ -6,13 +6,16 @@ import os
 from blackboard.blackboard import Blackboard
 from commander.agent import Commander
 from config import create_client
-from blackboard.schema import TaskResult
+from workers.base_worker import TaskResult
 from workers.registry import get_worker_registry
 from workers.web.agent import WebWorker
 from hooks import fire
 
-# Register Filter hook (side-effect on import)
-import filter.cleaner  # noqa: F401
+# Register Supervisor hooks (side-effect on import)
+# Replaces: guardrail/ + filter/ + evaluator/ — all converged into supervisor/
+import supervisor  # noqa: F401
+from supervisor import init_supervisor, should_compact as supervisor_should_compact
+from supervisor import get_observer_notes as supervisor_get_observer_notes
 
 
 class Engine:
@@ -47,6 +50,7 @@ class Engine:
         if os.path.exists(filepath):
             os.remove(filepath)#如果路径存在，则删除旧黑板
         self.blackboard = Blackboard(data_dir=self._data_dir)#create new blackboard instance to reset state
+        init_supervisor()#reset supervisor state for new mission
 
         # Phase 1: Initialize
         self.blackboard.create_goal(goal)#初始化向黑板添加目标
@@ -57,19 +61,19 @@ class Engine:
 
             # ── Hook: before_plan ──
             snapshot = self.blackboard.snapshot()#获取当前黑板的现状
-            ## hook1：before_plan，在Commander做决策前触发，提供当前黑板快照，
+            ## hook1：before_plan，在Commander做下一次决策前触发，提供当前黑板快照，
             ## 然后交给Guarddrail判断目标是否合法？
             ev = fire("before_plan", snapshot=snapshot, round=self._round)
             if ev.blocked:#如果被过滤器阻止了计划生成，则直接结束任务，返回失败报告
                 self._log(f"[BLOCKED] before_plan: {ev.block_reason}")
                 return self._build_report("failed", ev.block_reason)
             ## hook1没有生效，则，进行commander的计划生成，得到决策结果
-            decision = self.commander.plan(
-                self.blackboard.get_commander_view()
-            )
+            commander_view = self.blackboard.get_commander_view()
+            commander_view["observer_notes"] = supervisor_get_observer_notes()
+            decision = self.commander.plan(commander_view)
 
             # ── Hook: after_plan ──
-            ## hook2：after_plan，在Commander做出决策后触发，提供决策结果和当前黑板快照，logging记录commander的决策
+            ## hook2：after_plan，logging hook,在Commander做出决策后触发，提供决策结果和当前黑板快照，logging记录commander的决策
             fire("after_plan", snapshot=snapshot, decision=decision, round=self._round)
             #记录commander的决策descision+reasoning的前120字符
             self._log(f"Commander decision: {decision.decision}")
@@ -87,10 +91,10 @@ class Engine:
                 return report#返回report报告
 
             # Publish new tasks
-            #获取commander传递的decision{}字典任务并根据Guardrail的判断，决定是否在黑板上创建任务
+            #获取commander传递的decision{}字典任务并根据Guardrail的判断，决定是否在黑板上创建任务   
             for task_def in decision.new_tasks:
                 # ── Hook: before_task_create ──
-                ## hook3：before_task_create，在Commander创建任务后写入黑板前触发,交给Guardrail，检查分发的任务是否合法？
+                ## hook3：before_task_create，task_check_hook,在Commander创建任务后写入黑板前触发,交给Guardrail，检查分发的任务是否合法？
                 ev = fire("before_task_create", task_def=task_def)
                 if ev.blocked:#如果当前任务被Guardrail判定为非法，则记录并跳过执行
                     self._log(f"[BLOCKED] before_task_create: {ev.block_reason}")
@@ -138,7 +142,7 @@ class Engine:
         self.blackboard.start_task(task_id)#标记任务开始执行
 
         # ── Hook: before_execute ──
-        ## hook4 任务已经分发，具体的worker执行之前触发，Guardrail最后一次检查任务是否合法？
+        ## hook4 before_execute,task_safety_check_again,任务已经分发，具体的worker执行之前触发，Guardrail最后一次检查任务是否合法？
         ev = fire("before_execute", task=task, worker_name=worker.name)
         #如果被Guardrail判定为非法，则记录并退出任务执行，标记任务失败
         if ev.blocked:
@@ -151,14 +155,21 @@ class Engine:
         result = worker.execute(task, self.blackboard.snapshot())
 
         # ── Hook: after_execute (Filter can modify result) ──
-        ## hook5 执行之后触发，提供任务、执行结果和当前黑板快照，交给Filter过滤器检查结果是否合法？如果不合法，则可以修改结果或者标记任务失败
+        ## hook5 after_execute,task_result_filter,执行之后触发，提供任务、执行结果和当前黑板快照，交给Filter过滤器检查结果是否合法？如果不合法，则可以修改结果或者标记任务失败
         ev = fire("after_execute", task=task, result=result)
         result = ev.data.get("result", result)
 
-        findings = result.findings
-        status = result.status
-        summary = result.summary
-        output_data = result.output_data
+        # Normalize: TaskResult → dict access for uniform handling
+        if isinstance(result, TaskResult):#返回如果是TaskResult对象，则提取findings、status、summary和output_data属性；如果是dict，则直接从字典中获取这些字段
+            findings = result.findings
+            status = result.status
+            summary = result.summary
+            output_data = result.output_data
+        else:#如果直接是dict
+            findings = result.get("findings", [])
+            status = result.get("status", "completed")
+            summary = result.get("summary", "")
+            output_data = result.get("output_data", {})
 
         for finding in findings:
             if isinstance(finding, dict):
@@ -194,7 +205,7 @@ class Engine:
             "summary": summary,
             "raw_output": output_data,
         }
-        if result.error_detail:
+        if isinstance(result, TaskResult) and result.error_detail:
             task_output["error_detail"] = result.error_detail
 
         self.blackboard.complete_task(
@@ -220,7 +231,7 @@ class Engine:
 
     def _maybe_compact(self):
         """Trigger LLM compaction when findings accumulate past threshold."""
-        if not self.blackboard._needs_compact():
+        if not supervisor_should_compact(self.blackboard.get_findings()):
             return
         self._log("[Compact] Findings threshold exceeded, generating summary...")
         client = create_client(self.model)

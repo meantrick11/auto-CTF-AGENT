@@ -132,10 +132,84 @@
 - `docs/architecture.md` — rewritten overview with module table, directory map, MVP/v2/deferred status
 - `CLAUDE.md` — to be updated with new file index (pending, session running late)
 
-### To do next (v2 implementation order)
-1. Finding.status field (suspected/confirmed/dead_end) — schema change
-2. Merge Filter + Compactor into `context/` module
-3. Commander: add "hold" decision + direction allocation (not task-level)
-4. Evaluator module: rule-based drift detection, write observer_notes
-5. Monitor module: metrics tracking
-6. Multi-Worker parallel execution (direction-based grouping)
+## 2026-06-14 — Supervisor Agent + Architecture Hardening
+
+### BUUCTF live test results
+- Ran against real BUUCTF target (10 rounds) — flag not captured
+- Root cause analysis: Commander hallucination + Worker 8-iteration loop exhaustion + no supervision
+- Commander prompt fix eliminated hallucinations (no more "Burp Suite" instructions)
+
+### Supervisor module implemented
+- **Converged guardrail + filter + evaluator + maintenance into `supervisor/`**
+- Layer 1 (rules): safety.py, quality.py, drift.py, maintenance.py — pure Python, zero LLM
+- Layer 2 (agent): SupervisorAgent — LLM semantic review, called only when rules flag suspicious
+- Registered on all 7 hook points: before_plan, after_plan, before_task_create, before_execute, after_execute, on_finding, on_complete
+- Commander now receives observer_notes in every round's blackboard view
+- Commander prompt updated: decodes observer_notes, tool catalog injected, hallucinations blocked
+- filter/ and guardrail/ modules deprecated → logic moved to supervisor/
+
+### Engine updates
+- `import supervisor` replaces `import filter.cleaner`
+- `init_supervisor()` called at mission start to reset drift tracker
+- `supervisor_should_compact()` replaces blackboard._needs_compact()
+- observer_notes injected into Commander view before each plan() call
+
+### Architecture evolved: 3-Agent design
+```
+Commander (brain) → Worker (muscle) → Blackboard (memory)
+                 ↘ Supervisor (immune system) ↗
+                   monitors both, writes observer_notes
+```
+
+### To do next
+1. Tool deepening: http_request merge, SQLi exploit chain, CI exploit chain
+2. More domain workers (Crypto, RE)
+3. Persistent memory / RAG knowledge base
+
+## 2026-06-14 — Supervisor Redirection + Worker Reliability Fixes
+
+### Redirection system (user-requested active intervention)
+- Refactored `supervisor/__init__.py` to implement **redirection**: stronger than observer_notes
+- `set_redirection(blocked_types, suggested, reason)` — blocks specific task types
+- `clear_redirection()` — when task succeeds with substantial findings
+- `_is_blocked_by_redirection(task_def)` — enforced in before_task_create hook
+- `_analyze_and_intervene()` — reads Worker tool_trace, detects stuck (>=5 same-tool errors or >=70% error rate), escalates to Layer 2 Agent, issues redirection
+- `before_task_create` now enforces redirection by blocking dead-end task types
+- `after_plan` warns if Commander ignores active redirection
+- `after_execute` sets redirection on consecutive failures, clears on successful tasks
+
+### Worker agent_loop fixes (root cause of "8 iterations exhausted")
+- **Reduced max iterations**: 8 → 5
+- **Forced output at iteration 4**: removes tools from the call, demands final JSON
+- **Prompt updated**: "Limit yourself to at most 3 tool calls per task. After collecting results, output your JSON."
+- Result: all tasks now complete reliably (was ~60% failure rate due to loop exhaustion)
+
+### JSON Schema generation fix for union types
+- `dict | None` was resolving to `"string"` because `__origin__` attribute access fails on `types.UnionType`
+- **Fix**: use `typing.get_origin()` and `typing.get_args()` instead of direct `__origin__`/`__args__` access
+- `_resolve_type()` now handles `X | None`, `Optional[X]`, `Union[X, None]`
+- `http_get` headers param now correctly shows as `"type": "object"` in LLM tool schema
+- **Hard-won rule**: NEVER use direct `__origin__` access on type annotations — use `typing.get_origin()`
+
+### Tool description improvements
+- `http_get`, `http_post`: added `:param:` docstrings with examples → schema now shows `"X-Auth-Token": "abc123"` as example
+- Description updated: "Set custom headers (e.g. X-Auth-Token) via the headers dict"
+
+### Commander prompt hardening
+- Added `headers={"X-Auth-Token": "token_value"}` format examples in tool catalog
+- Added rule: "When registration yields an API token: include exact token value in instruction with explicit headers format"
+- Template instruction example prevents Commander from saying "use the token" without specifying HOW
+
+### End-to-end test: Supervisor target flag captured
+- `challenge/stage2_supervisor/test_supervisor.py` (port 8889) — designed to trigger Supervisor behaviors
+- Attack chain: directory scan → /config (token auth) → /debug (API paths) → /register (get token) → /api/flag with X-Auth-Token header → **FLAG: CTF{supervisor_validated_2024}**
+- 9 rounds, 25 findings, flag captured
+- Supervisor redirection system validated: Commander pivoted when warned, compaction triggered correctly
+
+### targets/ → challenge/ reorganization
+- Moved `targets/` → `challenge/` with staged subdirectories
+- `challenge/stage1_basic/` — original CTF Corp Portal (14 endpoints, port 8888)
+- `challenge/stage2_supervisor/` — Supervisor validation traps + dead ends (port 8889)
+- Updated all references in CLAUDE.md, README.md, docs/architecture.md
+- Created `challenge/README.md` with stage catalog and run instructions
+

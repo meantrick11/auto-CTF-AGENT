@@ -89,19 +89,20 @@ CTFAgent/
 │   ├── shared/              # encoding, network
 │   └── web/                 # recon, exploit
 │
-├── context/                 # [待合并] Context Manager = Filter + Compact
-│   ├── filter/              # → context/filter.py
-│   └── compact/             # → context/compact.py
+├── supervisor/              # 免疫系统 — safety + quality + drift + maintenance
+│   ├── safety.py            # Layer 1: 安全规则
+│   ├── quality.py           # Layer 1: Finding 去重/规范化
+│   ├── drift.py             # Layer 1: 漂移/重复/死胡同检测
+│   ├── maintenance.py       # Layer 1: compaction 触发 + observer notes
+│   ├── agent.py             # Layer 2: LLM 语义审查
+│   └── prompts/
 │
-├── evaluator/               # [新模块] 策略评估 + 方向纠偏
-│
-├── monitor/                 # [新模块] 横切度量
+├── filter/                  # [已弃用] → supervisor/quality.py
+├── guardrail/               # [已弃用] → supervisor/safety.py
 │
 ├── memory/                  # [将来] 跨运行持久知识
 │
-├── guardrail/               # [占位] 安全拦截
-│
-└── targets/                 # 本地靶场
+└── challenge/               # 本地靶场（按阶段）
 ```
 
 ## MVP vs v2 vs Deferred

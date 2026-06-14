@@ -134,6 +134,18 @@ class Commander:
         else:
             parts.append("(no events yet)")
 
+        observer_notes = snapshot.get("observer_notes", [])
+        if observer_notes:
+            parts.append("")
+            parts.append("## Supervisor Notes (READ CAREFULLY)")
+            parts.append("The Supervisor monitors your decisions and the Workers. Heed these notes:")
+            for note in observer_notes:
+                severity = note.get("severity", "info").upper()
+                parts.append(
+                    f"[{severity}] [{note.get('category', 'general')}] "
+                    f"{note.get('message', '')}"
+                )
+
         parts.append("")
         parts.append("Based on the above state, decide the next tactical step. ")
         parts.append(

@@ -1,7 +1,7 @@
 """Central tool registry — decorator-based registration + JSON Schema generation."""
 
 from dataclasses import dataclass, field
-from typing import Callable, Any
+from typing import Callable, Any, Optional
 import inspect
 import re
 
@@ -95,7 +95,32 @@ _TYPE_MAP = {
     bool: "boolean",
     dict: "object",
     list: "array",
+    type(None): "null",
 }
+
+
+def _resolve_type(py_type) -> str | None:
+    """Resolve a Python type annotation to a JSON Schema type.
+
+    Handles union types like dict|None → 'object', str|None → 'string',
+    and Optional[X] / Union[X, None].
+    Uses typing.get_origin/get_args for reliable access across Python versions.
+    """
+    import typing as _typing
+    origin = _typing.get_origin(py_type)
+    if origin is not None:
+        args = _typing.get_args(py_type)
+        # Check if it's a Union type (Optional[X] or X | None)
+        import types as _types
+        if origin in (_types.UnionType, _typing.Union):
+            for arg in args:
+                if arg is not type(None):
+                    return _TYPE_MAP.get(arg)
+            return None
+        # Handle list[X], dict[K,V] etc.
+        if origin in (list, dict):
+            return _TYPE_MAP.get(origin)
+    return _TYPE_MAP.get(py_type)
 
 
 def _parse_param_descriptions(func: Callable) -> dict[str, str]:
@@ -117,7 +142,19 @@ def _build_json_schema(func: Callable) -> dict:
         if name == "self":
             continue
         py_type = str if param.annotation is inspect.Parameter.empty else param.annotation
-        json_type = _TYPE_MAP.get(py_type, "string")
+        json_type = _resolve_type(py_type) or "string"
+
+        # Check if this param is optional (has default or is Optional[...])
+        has_default = param.default is not inspect.Parameter.empty
+        is_optional = has_default  # has default → optional
+        # Also detect Optional[X] = X | None or typing.Optional[X]
+        import types as _types
+        import typing as _typing
+        origin = _typing.get_origin(py_type)
+        if origin in (_types.UnionType, _typing.Union):
+            args = _typing.get_args(py_type)
+            if type(None) in args:
+                is_optional = True
 
         prop: dict = {"type": json_type}
         if name in param_descs:
@@ -127,7 +164,8 @@ def _build_json_schema(func: Callable) -> dict:
                 prop["default"] = param.default
             elif isinstance(param.default, (int, float, bool)):
                 prop["default"] = param.default
-        else:
+
+        if not is_optional:
             required.append(name)
 
         properties[name] = prop

@@ -39,7 +39,7 @@ python main.py -g "Decode this base64: ZmxhZ3t0ZXN0X2ZsYWd9" -n 5
 
 # 3. Full attack test — needs local target
 # Terminal 1:
-python targets/test_target.py
+python challenge\stage1_basic\test_target.py
 # Terminal 2:
 python main.py -g "Attack http://localhost:8888 and capture the flag" -n 8
 ```
@@ -71,16 +71,17 @@ python main.py -g "goal description" [-n max_rounds] [-m model] [-o report.json]
 - Base64/hex/URL encoding and decoding
 - Autonomous multi-round attack planning and execution
 - Structured finding extraction (asset, vulnerability, credential, flag)
+- **Supervisor Agent** — monitors Commander decisions and Worker execution for safety, drift, and quality
 - Full audit trail via event log
 
 ## What's Deferred (not in MVP)
 
-- Guardrail agent (safety checks) — 3 hook points ready, not yet implemented
 - Cross-task memory / RAG knowledge base
 - Multi-domain workers (Crypto, RE, PWN, Forensics)
 - MCP external tool integration
 - Database persistence (JSON file only)
 - Concurrent worker execution
+- Container-based tool sandbox (Docker)
 
 ## Project Structure
 
@@ -90,15 +91,25 @@ CTFAgent/
 ├── config.py                # API client, SSL, .env loading
 ├── utils.py                 # extract_json() helper
 │
-├── targets/                  # Local vulnerable test range
-│   ├── README.md             # Target catalog & attack chains
-│   └── test_target.py        # CTF Corp Portal (14 endpoints)
+├── challenge/                # Local vulnerable test range (staged)
+│   ├── README.md             # Stage catalog & attack chains
+│   ├── stage1_basic/         # CTF Corp Portal (14 endpoints)
+│   │   └── test_target.py
+│   └── stage2_supervisor/    # Supervisor validation (traps + dead ends)
+│       └── test_supervisor.py
 ├── requirements.txt
 ├── .env.example
 │
 ├── blackboard/              # State Plane — shared memory
 │   ├── schema.py            # Goal, Task, Finding, EventLog
 │   └── blackboard.py        # CRUD + JSON persistence
+│
+├── supervisor/              # Immune System — monitors Commander+Worker
+│   ├── safety.py            # Layer 1: safety rules
+│   ├── quality.py           # Layer 1: finding quality
+│   ├── drift.py             # Layer 1: stagnation/repetition detection
+│   ├── maintenance.py       # Layer 1: compaction + observer notes
+│   └── agent.py             # Layer 2: LLM semantic review
 │
 ├── commander/               # Orchestration Plane — tactical brain
 │   ├── agent.py             # Reads snapshot, outputs JSON decisions

@@ -1,8 +1,9 @@
-# Filter — Data Washer
+# Filter — DEPRECATED
 
-## Role
+**This module has been merged into `supervisor/`.**
+Filter logic now lives in `supervisor/quality.py`.
 
-Rule-based data cleaner between Worker output and Blackboard. Hooks into `after_execute`. **Does one thing: clean findings without dropping data.**
+See: `supervisor/README.md`
 
 ## Status: Implemented (2026-05-24)
 

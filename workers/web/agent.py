@@ -86,10 +86,40 @@ class WebWorker(BaseWorker):
         return "\n".join(parts)
 
     def _agent_loop(self, messages: list[dict]) -> TaskResult:
-        """Run LLM + tool-calling loop. Max 8 iterations."""
+        """Run LLM + tool-calling loop. Max 5 iterations.
+
+        Records a tool_trace for Supervisor's after_execute hook to analyze.
+        No direct Supervisor dependency — Worker just reports what happened.
+
+        At iteration 4, forces the LLM to output final JSON (no more tools).
+        """
         tool_schemas = [t.to_openai_tool() for t in self.tools]
 
-        for _ in range(8):
+        tool_trace: list[dict] = []
+
+        for iteration in range(5):
+            # At iteration 4, force final output — remove tools, demand JSON
+            if iteration >= 4:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have called enough tools. Output your FINAL JSON result "
+                        "NOW. Do NOT request more tools. Start with { and end with }."
+                    ),
+                })
+                response = retry_llm_call(
+                    lambda: self._client.chat.completions.create(
+                        model=self.model,
+                        max_tokens=4096,
+                        messages=messages,
+                    )
+                )
+                text = response.choices[0].message.content or ""
+                result = self._parse_final_output(text)
+                if tool_trace:
+                    result.output_data["tool_trace"] = tool_trace
+                return result
+
             response = retry_llm_call(
                 lambda: self._client.chat.completions.create(
                     model=self.model,
@@ -105,7 +135,10 @@ class WebWorker(BaseWorker):
             # If no tool calls, parse final output
             if not msg.tool_calls:
                 text = msg.content or ""
-                return self._parse_final_output(text)
+                result = self._parse_final_output(text)
+                if tool_trace:
+                    result.output_data["tool_trace"] = tool_trace
+                return result
 
             # Append assistant message with tool calls
             messages.append({
@@ -131,17 +164,35 @@ class WebWorker(BaseWorker):
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     args = {}
-                result = self._call_tool(tool_name, args)
+
+                tool_result = self._call_tool(tool_name, args)
+
+                tool_trace.append({
+                    "iteration": iteration + 1,
+                    "tool": tool_name,
+                    "args_keys": list(args.keys()) if args else [],
+                    "has_error": bool(tool_result.get("error")),
+                    "status_code": tool_result.get("status_code"),
+                })
 
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False),
+                    "content": json.dumps(tool_result, ensure_ascii=False),
                 })
 
         return TaskResult(
             status="failed",
-            summary="Max tool-calling iterations reached without final output",
+            summary=(
+                f"Max tool-calling iterations reached. "
+                f"Tools called: {[t['tool'] for t in tool_trace]}"
+            ),
+            output_data={"tool_trace": tool_trace},
+            error_detail={
+                "error_type": "agent_failed",
+                "detail": "5 iterations exhausted — could not complete task",
+                "tool_trace": tool_trace,
+            },
         )
 
     def _call_tool(self, name: str, inputs: dict) -> dict:

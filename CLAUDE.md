@@ -48,22 +48,21 @@ Call `event.block("reason")` to stop execution. Modify `event.data` to mutate pa
 
 Key files: `hooks.py` (HookEvent + HookRegistry), `orchestrator/engine.py` (7 fire points).
 
-## Architecture (v2 — 9 modules + new modules being added)
+## Architecture (v2 — 9 modules + Supervisor Agent)
 
 ```
 main.py → orchestrator/engine.py  ←── the ONLY coupling point
               ├── commander/agent.py           (depends: config, utils, blackboard.schema)
               ├── workers/registry.py          (depends: workers/base_worker.py)
               ├── workers/web/agent.py         (depends: config, utils, tools, base_worker)
-              ├── context/                     (NEW v2 — Filter + Compactor merged)
-              ├── evaluator/                   (NEW v2 — drift detection)
-              ├── monitor/                     (NEW v2 — metrics)
-              ├── guardrail/                   (placeholder — hooks: before_plan, before_task_create, before_execute)
-              └── blackboard/                  (depends: NOTHING — pure storage. Compactor moved to context/)
+              ├── supervisor/                  (NEW — safety + drift + quality + maintenance. Consumes guardrail/ + filter/ + evaluator/)
+              ├── blackboard/                  (depends: NOTHING — pure storage)
+              └── tools/                       (depends: registry.py)
 ```
 
-**Key rule:** Commander and Worker are 100% independent. No direct import or communication.
-All coordination through Blackboard: Commander writes Directions → Workers write Findings.
+**Key rule:** Three agents — Commander (brain), Worker (muscle), Supervisor (immune system).
+Commander and Worker are 100% independent. Supervisor monitors both via hooks.
+All coordination through Blackboard: Commander writes Directions → Workers write Findings → Supervisor writes Observer Notes.
 
 ### Module Responsibility Principle
 
@@ -73,11 +72,8 @@ All coordination through Blackboard: Commander writes Directions → Workers wri
 |---|---|
 | Commander | Read state → decide attack directions |
 | Worker | Execute one direction → return findings |
+| Supervisor | Monitor Commander+Worker: safety, drift, quality, maintenance. Layer 1 (rules) + Layer 2 (Agent) |
 | Blackboard | Store and serve state — information exchange + short-term memory |
-| Context Manager | Maintain information quality: Filter (rules) + Compact (LLM) |
-| Evaluator | Detect drift, mark dead ends, remind Commander |
-| Monitor | Track metrics: tokens, timing, success rates |
-| Memory | Persist knowledge across runs (future) |
 | Engine | Drive the loop (sole coupling point) |
 | ToolRegistry | Register and dispatch tools |
 | WorkerRegistry | Register and route workers |
@@ -128,38 +124,23 @@ All coordination through Blackboard: Commander writes Directions → Workers wri
 | `tools/web/recon.py` | web_directory_scan, web_extract_forms, web_analyze_headers |
 | `tools/web/exploit.py` | web_sqli_test, web_xss_test, web_command_injection_test |
 
-### Filter (Data Washer — implemented, → merging into Context Manager)
+### Supervisor (Immune System — converged guardrail + filter + evaluator + maintenance)
 | File | Role |
 |---|---|
-| `filter/cleaner.py` | Rule-based: dedup by (type,title), normalize fields, mark large data. Hooks into after_execute. |
-| `filter/__init__.py` | Imports cleaner to register hook. |
-| `filter/README.md` | Full spec: hook point, operations, what Filter does NOT do. |
+| `supervisor/__init__.py` | Registers all 7 hooks, redirection system (block dead-end task types), wires Layer 1 → Layer 2 escalation |
+| `supervisor/safety.py` | Layer 1: Task/instruction safety checks (formerly guardrail/) |
+| `supervisor/quality.py` | Layer 1: Finding dedup/normalize/validate (formerly filter/) |
+| `supervisor/drift.py` | Layer 1: Stagnation/repetition/stuck detection (formerly evaluator/) |
+| `supervisor/maintenance.py` | Layer 1: Compaction triggering + observer notes |
+| `supervisor/agent.py` | Layer 2: SupervisorAgent — LLM semantic review (called only when Layer 1 flags suspicious) |
+| `supervisor/prompts/system_prompt.txt` | Supervisor Agent system prompt |
+| `supervisor/README.md` | Module docs |
 
-### Context Manager (new v2 — merging Filter + Compactor)
+### Deprecated (merged into supervisor/)
 | File | Role |
 |---|---|
-| `context/` | Information quality control. Phase 1: Filter (rules). Phase 2: Compact (LLM, threshold). |
-
-### Evaluator (new v2)
-| File | Role |
-|---|---|
-| `evaluator/` | Strategy assessment. Rule-based drift detection, dead-end marking. Writes observer_notes → Blackboard. |
-
-### Monitor (new v2)
-| File | Role |
-|---|---|
-| `monitor/` | Cross-cutting metrics. Token usage, timing, success rate. Read-only. |
-
-### Memory (future)
-| File | Role |
-|---|---|
-| `memory/` | Cross-run persistent knowledge. RAG-retrievable. Deferred. |
-
-### Guardrail (Safety Shield — placeholder)
-| File | Role |
-|---|---|
-| `guardrail/README.md` | Full spec: 3-layer interception, deny-first rule model, Rule dataclass, test pattern |
-| `guardrail/__init__.py` | Placeholder — import skeleton when implementation starts |
+| `filter/` | → supervisor/quality.py |
+| `guardrail/` | → supervisor/safety.py |
 
 ### Docs
 | File | Role |
@@ -170,11 +151,12 @@ All coordination through Blackboard: Commander writes Directions → Workers wri
 | `ArchitectureBookEN.md` | Full architecture design document (the blueprint) |
 | `ArchitectureBookCN.md` | Chinese version |
 
-### Targets (local test range)
+### Challenge (local test range — staged by difficulty)
 | File | Role |
 |---|---|
-| `targets/README.md` | Target catalog: vulnerability matrix, attack chain, how to add new targets |
-| `targets/test_target.py` | CTF Corp Portal — 14 endpoints, multi-step CTF (SQLi, XSS, CI, info leak, auth bypass) |
+| `challenge/README.md` | Challenge catalog: stage list, vulnerability matrix, attack chains, run instructions |
+| `challenge/stage1_basic/test_target.py` | CTF Corp Portal — 14 endpoints, multi-step CTF (SQLi, XSS, CI, info leak, auth bypass) |
+| `challenge/stage2_supervisor/test_supervisor.py` | Supervisor validation — traps (fake SQLi), dead ends, correct path (register → token → flag) |
 
 ### Hook System
 | File | Role |
@@ -216,7 +198,7 @@ pip install -r requirements.txt
 python main.py -g "Decode this base64: ZmxhZ3tmYWpka2xmamFvZmpxZWlmXzEzMjE0YWZsZmFpb30=" -n 5
 
 # Full attack (needs target)
-# Terminal 1: python targets/test_target.py
+# Terminal 1: python challenge\stage1_basic\test_target.py
 # Terminal 2: python main.py -g "Attack http://localhost:8888 and capture the flag" -n 8
 ```
 
@@ -257,13 +239,14 @@ These were discovered through debugging. Violating any of them breaks the system
 - Tool registration is a **singleton**. `get_registry()` always returns the same instance.
 - Tools are **pure functions** with type hints. The registry auto-generates JSON Schema from `inspect.signature()`.
 - Domain tools MAY import shared tools (e.g., `tools/web/recon.py` imports `http_get` from shared network).
+- **Type annotation introspection: use `typing.get_origin()` and `typing.get_args()`.** Never use direct `__origin__`/`__args__` attribute access on type annotations — `types.UnionType` (from `X | None` syntax) stores these differently and direct access returns None. This cost us hours debugging why `dict | None` was resolving to `"string"` in tool schemas.
 
 ### API / LLM
 - **DeepSeek base URL is `https://api.deepseek.com`** (no `/v1` suffix). The OpenAI SDK appends `/chat/completions` automatically.
 - **SSL verify is OFF** (`CTFAGENT_SSL_VERIFY=false`). Windows cert chain issues. Config creates `httpx.Client(verify=False)`.
 - **`config.create_client()`** is the single factory for OpenAI clients. Both Commander and Worker use it.
 - Worker tool calling uses **OpenAI format**: `tool_calls` in assistant messages, `role: "tool"` for results.
-- Agent loop has **max 8 iterations** to prevent infinite tool-calling.
+- Agent loop has **max 5 iterations**, forced output at iteration 4 (removes tools, demands JSON). Prevents loop exhaustion.
 
 ### Agent Independence
 - **Commander and Worker have ZERO imports of each other.** Verified by grep.
@@ -332,10 +315,9 @@ These were discovered through debugging. Violating any of them breaks the system
 
 ## Next Steps (user's priority order TBD)
 
+- Tool deepening: SQLi/CI exploit chains (beyond detection → exploitation)
+- Additional domain workers (Crypto, RE)
 - Add persistent memory / RAG knowledge base
 - MCP tool integration
-- Additional domain workers (Crypto, RE)
-- Guardrail agent for safety
 - SQLite persistence
-- Multi-task session support
 - Worker context compression (Worker currently gets full snapshot — same approach as Commander)

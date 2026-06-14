@@ -38,9 +38,14 @@ def _build_opener():
 _opener = _build_opener()
 
 
-@register_tool(category="shared", description="Send an HTTP GET request to a URL. Supports custom headers and cookies.")
+@register_tool(category="shared", description="Send an HTTP GET request. Set custom headers (e.g. X-Auth-Token) via the headers dict. Set cookies via the cookies dict.")
 def http_get(url: str, headers: dict | None = None,
              cookies: dict | None = None) -> dict:
+    """
+    :param url: Full URL to request (e.g. http://localhost:8889/api/flag)
+    :param headers: Optional dict of HTTP headers (e.g. {"X-Auth-Token": "abc123"})
+    :param cookies: Optional dict of cookies (e.g. {"session": "abc"})
+    """
     req = urllib.request.Request(url, method="GET")
     req.add_header("User-Agent", "CTFAgent/1.0")
 
@@ -70,9 +75,15 @@ def http_get(url: str, headers: dict | None = None,
                 "body_length": 0, "error": str(exc), "error_type": "unknown"}
 
 
-@register_tool(category="shared", description="Send an HTTP POST request. Returns ALL response headers including Set-Cookie (redirects are NOT followed).")
+@register_tool(category="shared", description="Send an HTTP POST request. Set custom headers (e.g. X-Auth-Token) via the headers dict. Set cookies via the cookies dict. Returns ALL response headers.")
 def http_post(url: str, data: str = "", headers: dict | None = None,
               cookies: dict | None = None) -> dict:
+    """
+    :param url: Full URL to POST to
+    :param data: Raw body data (use url-encoded format: key1=value1&key2=value2)
+    :param headers: Optional dict of HTTP headers (e.g. {"X-Auth-Token": "abc123"})
+    :param cookies: Optional dict of cookies (e.g. {"session": "abc"})
+    """
     body_bytes = data.encode("utf-8")
     req = urllib.request.Request(url, data=body_bytes, method="POST")
     req.add_header("User-Agent", "CTFAgent/1.0")
